@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # 서드파티
+    'rest_framework',  # Django REST Framework — API 구현에 사용
 ]
 
 MIDDLEWARE = [
