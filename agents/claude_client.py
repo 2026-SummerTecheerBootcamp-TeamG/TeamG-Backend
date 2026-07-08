@@ -35,7 +35,7 @@ _client = anthropic.Anthropic()
 
 # 기본으로 사용할 Claude 모델.
 # 모델 변경이 필요하면 이 상수만 바꾸거나, 호출 시 model 인자로 넘기면 된다.
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5"
 
 
 def ask_claude(
@@ -84,7 +84,10 @@ def ask_claude(
     # Claude API 호출 (동기 방식 — 응답이 올 때까지 대기)
     response = _client.messages.create(**kwargs)
 
-    # 응답 형식: response.content는 블록들의 리스트이며,
-    # 일반 텍스트 응답은 첫 번째 블록의 .text에 들어 있다.
-    # (나중에 tool use 등을 쓰면 블록이 여러 개일 수 있음)
-    return response.content[0].text
+   # 응답 형식: response.content는 블록들의 리스트다.
+    # Sonnet 5부터는 adaptive thinking이 기본이라 응답이
+    # [ThinkingBlock(사고 과정), TextBlock(실제 답변)] 순서로 올 수 있다.
+    # 따라서 첫 블록을 무조건 꺼내지 말고, 타입이 "text"인 블록만 골라 합친다.
+    # (thinking 블록에는 .text 속성이 없어서 content[0].text는 에러 발생)
+    text_parts = [block.text for block in response.content if block.type == "text"]
+    return "".join(text_parts)
