@@ -1,5 +1,14 @@
-﻿# 직접 설치한 패키지만 버전과 함께 기록합니다. (하위 의존성은 pip이 알아서 설치)
-# 새 패키지를 추가하면 여기에 한 줄 추가 후 커밋 — 자세한 규칙은 루트 README 참고
-
-Django==5.2.15
+asgiref==3.11.1
+attrs==26.1.0
+Django==4.2.30
 djangorestframework==3.16.1
+drf-spectacular==0.30.0
+inflection==0.5.1
+jsonschema==4.25.1
+jsonschema-specifications==2025.9.1
+PyYAML==6.0.3
+referencing==0.36.2
+rpds-py==0.27.1
+sqlparse==0.5.5
+typing_extensions==4.16.0
+uritemplate==4.2.0

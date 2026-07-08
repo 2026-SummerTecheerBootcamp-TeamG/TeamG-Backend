@@ -39,6 +39,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # 서드파티
     'rest_framework',  # Django REST Framework — API 구현에 사용
+    'drf_spectacular',
+    'users',
 ]
 
 MIDDLEWARE = [
@@ -123,3 +125,10 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+AUTH_USER_MODEL = "users.User"
+
+# API 문서를 drf0spectacular로 만들어야 함을 DRF에 알림
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
