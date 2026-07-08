@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'rest_framework',  # Django REST Framework — API 구현에 사용
     'drf_spectacular',
     'users',
+    'agents'
 ]
 
 MIDDLEWARE = [
