@@ -2,9 +2,23 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    # POST /api/v1/parse/
-    # config/urls.py에서 "api/v1/parse/"로 include했으니까
-    # 여기선 빈 문자열로 받으면 됨
+    # POST /api/v1/agents/parse/
+    # 자연어 입력 → 구조화 JSON 변환
     path("parse/", views.parse_request, name="parse-request"),
+
+    # POST /api/v1/agents/parse/answer/
+    # 재질문 답변 병합 후 재파싱
     path("parse/answer/", views.parse_answer, name="parse-answer"),
+
+    # GET /api/v1/agents/parse/{parse_id}/
+    # 파싱 결과 조회 (프론트 확인 카드용)
+    path("parse/<str:parse_id>/", views.parse_detail, name="parse-detail"),
+
+    # POST /api/v1/agents/parse/{parse_id}/confirm/
+    # 사용자 확정 → 파이프라인 실행 신호
+    path("parse/<str:parse_id>/confirm/", views.parse_confirm, name="parse-confirm"),
+
+    # POST /api/v1/agents/parse/{parse_id}/correct/
+    # 사용자 정정 → 특정 필드 수정 후 재검증
+    path("parse/<str:parse_id>/correct/", views.parse_correct, name="parse-correct"),
 ]

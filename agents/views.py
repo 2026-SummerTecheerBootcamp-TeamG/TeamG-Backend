@@ -224,3 +224,200 @@ def parse_answer(request):
         })
 
     return Response(parsed)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def parse_detail(request, parse_id):
+    """
+    파싱 결과 조회 엔드포인트.
+
+    프론트가 확인 카드를 보여주기 위해 호출함.
+    parse/ 호출 후 받은 parse_id로 캐시에서 파싱 결과를 꺼내서 반환.
+
+    Response 200:
+        {
+            "parse_id": "p_xxx",
+            "fields": { ... },
+            "assumed_fields": [...],
+            "missing_slots": [...],
+            "filled_from_profile": [...],
+            "warnings": [...]
+        }
+
+    Response 404: {"error": "파싱 결과를 찾을 수 없습니다."}
+    """
+
+    # ── Step 1. 캐시에서 파싱 결과 꺼내기 ───────────────────────────────
+    # parse/ 호출 시 parse_id를 키로 저장해둔 것을 꺼냄
+    cached = cache.get(f"parse:{parse_id}")
+    if not cached:
+        return Response(
+            {"error": "파싱 결과를 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # ── Step 2. 파싱 결과 반환 ───────────────────────────────────────────
+    return Response(cached.get("parsed"))
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def parse_confirm(request, parse_id):
+    """
+    사용자 확정 엔드포인트.
+
+    프론트에서 확인 카드의 "확정" 버튼을 누르면 이 API를 호출함.
+    파이프라인(항공/숙소 검색) 실행 신호를 반환.
+    잘못 이해한 상태로 파이프라인이 실행되는 것을 방지하는 게이트 역할.
+
+    Response 200:
+        {
+            "parse_id": "p_xxx",
+            "status": "confirmed",
+            "fields": { ... }   ← 파이프라인에 넘길 파싱 결과
+        }
+
+    Response 404: {"error": "파싱 결과를 찾을 수 없습니다."}
+    """
+
+    # ── Step 1. 캐시에서 파싱 결과 꺼내기 ───────────────────────────────
+    cached = cache.get(f"parse:{parse_id}")
+    if not cached:
+        return Response(
+            {"error": "파싱 결과를 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    parsed = cached.get("parsed")
+
+    # ── Step 2. 확정 상태로 캐시 업데이트 ───────────────────────────────
+    # 확정된 파싱 결과임을 표시해서 파이프라인이 신뢰하고 사용할 수 있게
+    cached["confirmed"] = True
+    cache.set(f"parse:{parse_id}", cached, timeout=60 * 30)
+
+    # ── Step 3. 확정 결과 반환 ───────────────────────────────────────────
+    # 이 응답을 받은 프론트는 파이프라인(항공/숙소 검색)을 실행
+    return Response({
+        "parse_id": parse_id,
+        "status":   "confirmed",
+        "fields":   parsed.get("fields"),
+    })
+
+
+class ParseCorrectSerializer(serializers.Serializer):
+    """
+    Swagger 문서용 정정 요청 바디 스키마.
+
+    사용자가 확인 카드에서 특정 필드를 정정할 때 사용.
+    field: 수정할 필드명 (예: "budget", "destinations", "pax")
+    value: 수정할 값 (예: 500000, "성인 2명")
+    """
+    field = serializers.CharField(
+        help_text="수정할 필드명 (예: budget, destinations, pax, dates)"
+    )
+    value = serializers.CharField(
+        help_text="수정할 값을 자연어로 입력 (예: 50만원, 성인 2명, 3박4일)"
+    )
+
+
+@extend_schema(request=ParseCorrectSerializer)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def parse_correct(request, parse_id):
+    """
+    사용자 정정 엔드포인트.
+
+    프론트에서 확인 카드의 특정 필드를 수정하면 이 API를 호출함.
+    수정된 값을 자연어로 받아서 재파싱 후 슬롯 재검증.
+
+    Request Body:
+        {
+            "field": "budget",
+            "value": "50만원"
+        }
+
+    Response 200 - 정정 후 슬롯 완전:
+        {
+            "parse_id": "p_new",
+            "status": "corrected",
+            "fields": { ... }
+        }
+
+    Response 200 - 정정 후 슬롯 누락:
+        {
+            "parse_id": "p_new",
+            "status": "corrected",
+            "reask_message": "...",
+            "missing_slots": [...]
+        }
+
+    Response 400: {"error": "field와 value 필드가 필요합니다."}
+    Response 404: {"error": "파싱 결과를 찾을 수 없습니다."}
+    """
+
+    # ── Step 1. 요청에서 field, value 꺼내기 ─────────────────────────────
+    field = request.data.get("field", "").strip()
+    value = request.data.get("value", "").strip()
+
+    if not field or not value:
+        return Response(
+            {"error": "field와 value 필드가 필요합니다."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # ── Step 2. 캐시에서 기존 파싱 결과 꺼내기 ───────────────────────────
+    cached = cache.get(f"parse:{parse_id}")
+    if not cached:
+        return Response(
+            {"error": "파싱 결과를 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # ── Step 3. 원문 + 정정 내용 병합 후 재파싱 ─────────────────────────
+    # 원문: "후쿠오카 3박4일 쇼핑, 80만"
+    # 정정: field="budget", value="50만원"
+    # 병합: "후쿠오카 3박4일 쇼핑, 80만 예산은 50만원으로 수정"
+    original_message = cached.get("original_message", "")
+    merged_message = f"{original_message} {field}은(는) {value}으로 수정"
+
+    user = request.user
+    user_profile = {
+        "origin_iata": getattr(user, "default_departure", "ICN"),
+        "nationality": getattr(user, "nationality", "KR"),
+    }
+
+    try:
+        parsed = parse_intent(merged_message, user_profile)
+    except ValueError as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    except Exception as e:
+        return Response(
+            {"error": "파싱 중 오류가 발생했습니다.", "detail": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # ── Step 4. 정정된 결과 캐시 저장 ───────────────────────────────────
+    cache.set(f"parse:{parsed['parse_id']}", {
+        "original_message": merged_message,
+        "parsed": parsed,
+    }, timeout=60 * 30)
+
+    # ── Step 5. 슬롯 검증 후 반환 ────────────────────────────────────────
+    validation = validate_slots(parsed)
+
+    if not validation["ok"]:
+        return Response({
+            "parse_id":      parsed.get("parse_id"),
+            "status":        "corrected",
+            "reask_message": validation["reask_message"],
+            "missing_slots": validation["missing"],
+            "fields":        parsed.get("fields"),
+        })
+
+    return Response({
+        "parse_id": parsed.get("parse_id"),
+        "status":   "corrected",
+        "fields":   parsed.get("fields"),
+    })
