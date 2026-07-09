@@ -41,8 +41,9 @@ INSTALLED_APPS = [
     # 서드파티
     'rest_framework',  # Django REST Framework — API 구현에 사용
     'drf_spectacular',
-    'users',
-    'agents'
+    'users',    # User 모델
+    'agents',   # 에이전트
+    'trips',    # 여행 도메인 모델 (요청/플랜/일정, ERD 중 User 제외 8개)
 ]
 
 MIDDLEWARE = [
