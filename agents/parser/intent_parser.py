@@ -3,7 +3,7 @@
 
 이 모듈이 요청 이해 파이프라인의 핵심.
 사용자가 채팅창에 "도쿄 2박3일 미식, 30만" 이라고 치면
-이 모듈이 그걸 받아서 API 명세서 형식의 JSON으로 변환해줌:
+이 모듈이 그걸 받아서 API 명세서 형식의 JSON으로 변환함:
 
 {
     "parse_id": "p_1",
@@ -30,10 +30,12 @@
 }
 
 작동 순서:
-    1. Claude API에 사용자 입력 전달 → JSON 응답 받기
-    2. normalizer로 수량 표현 보정 (Claude가 놓친 "80만" 같은 것)
-    3. 유저 프로필로 누락 슬롯 자동 채우기 (출발지 등)
-    4. API 명세서 형식으로 변환해서 반환
+    1. Claude API에 사용자 입력 전달 → JSON 응답 받기 (실패 시 최대 2회 재시도)
+    2. 여행과 무관한 입력 감지 → 안내 메시지 반환
+    3. normalizer로 수량 표현 보정 (Claude가 놓친 "80만" 같은 것)
+    4. 유저 프로필로 누락 슬롯 자동 채우기 (출발지 등)
+    5. 비현실 값 감지 → warnings 생성
+    6. API 명세서 형식으로 변환해서 반환
 """
 import json
 import re
@@ -43,9 +45,9 @@ from agents.claude_client import ask_claude
 from .normalizer import normalize_budget, normalize_duration, normalize_headcount
 
 
-# Claude에게 전달하는 시스템 프롬프트
-# 에이전트 역할과 출력 형식을 정의함
-# 이 프롬프트가 파싱 품질을 결정하는 핵심이라서 신중하게 작성해야 해
+# Claude에게 전달하는 시스템 프롬프트.
+# 에이전트 역할과 출력 형식을 정의함.
+# 이 프롬프트가 파싱 품질을 결정하는 핵심이라서 신중하게 작성해야 함.
 SYSTEM_PROMPT = """
 너는 여행 요청을 분석하는 파서야.
 사용자의 자연어 입력을 받아서 아래 JSON 스키마로 변환해줘.
@@ -102,7 +104,7 @@ def parse_intent(user_input: str, user_profile: dict | None = None) -> dict:
     자연어 입력을 API 명세서 형식의 구조화 JSON으로 변환하는 메인 함수.
 
     ChatInput 컴포넌트에서 사용자가 메시지를 보내면
-    views.py가 이 함수를 호출해서 파싱 결과를 돌려받아.
+    views.py가 이 함수를 호출해서 파싱 결과를 돌려받음.
 
     Args:
         user_input: 사용자가 채팅창에 입력한 자연어 문자열
@@ -115,38 +117,87 @@ def parse_intent(user_input: str, user_profile: dict | None = None) -> dict:
         API 명세서 형식의 파싱 결과 dict
 
     Raises:
-        ValueError: Claude 응답이 JSON 형식이 아닐 때
+        ValueError: Claude 응답이 JSON 형식이 아닐 때,
+                    또는 여행과 무관한 입력일 때
         Exception: Claude API 호출 자체가 실패했을 때 (키 오류, 네트워크 등)
     """
-    # Step 1: Claude API 호출해서 자연어 → JSON 변환
-    # SYSTEM_PROMPT에 역할과 출력 형식이 정의되어 있음
-    raw_response = ask_claude(
-        prompt=user_input,
-        system=SYSTEM_PROMPT,
-        max_tokens=1024,  # 파싱 결과는 짧으니까 1024면 충분
+
+    # ── Step 1. Claude API 호출 ───────────────────────────────────────────
+    # 실패 시 최대 2회 재시도 (총 3회 시도).
+    # Claude가 가끔 JSON 형식이 아닌 응답을 보내는 경우가 있어서
+    # 재시도 시 프롬프트에 힌트를 추가해서 JSON 형식을 강제함.
+    MAX_RETRIES = 2
+    last_error = None
+    claude_parsed = None
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            raw_response = ask_claude(
+                prompt=user_input,
+                system=SYSTEM_PROMPT,
+                max_tokens=1024,  # 파싱 결과는 짧으니까 1024면 충분
+            )
+            # 응답 문자열에서 JSON 파싱
+            # Claude가 가끔 ```json ... ``` 형식으로 감싸서 보내는 경우가 있어서 방어 처리
+            claude_parsed = _extract_json(raw_response)
+            break  # 성공하면 루프 탈출
+
+        except ValueError as e:
+            # Claude 응답이 JSON 형식이 아닐 때 발생
+            last_error = e
+            if attempt < MAX_RETRIES:
+                # 재시도 전에 프롬프트에 힌트를 추가해서
+                # 다음 시도에서 JSON 형식을 강제함
+                user_input = f"{user_input}\n(반드시 JSON 형식으로만 응답해줘)"
+                continue
+            # 최대 재시도 횟수를 모두 소진했을 때
+            # 사용자가 이해할 수 있는 메시지로 에러를 전환해서 던짐
+            raise ValueError(
+                "입력을 이해하지 못했어요. 다시 한번 입력해 주세요.\n"
+                "예: '후쿠오카 3박4일 쇼핑, 80만원'"
+            ) from last_error
+
+    # ── Step 2. 여행과 무관한 입력 감지 ─────────────────────────────────
+    # destinations, budget, themes 중 아무것도 없으면
+    # 여행 요청이 아닌 것으로 판단하고 안내 메시지를 반환함.
+    # 예: "안녕", "오늘 날씨 어때?" 같은 무관한 입력 차단
+    is_travel_related = (
+        claude_parsed.get("destinations") or
+        claude_parsed.get("budget") or
+        claude_parsed.get("themes")
     )
+    if not is_travel_related:
+        raise ValueError(
+            "여행 관련 요청을 입력해 주세요.\n"
+            "예: '후쿠오카 3박4일 쇼핑, 80만원'"
+        )
 
-    # Step 2: 응답 문자열에서 JSON 파싱
-    # Claude가 가끔 ```json ... ``` 형식으로 감싸서 보내는 경우가 있어서 방어 처리
-    claude_parsed = _extract_json(raw_response)
-
-    # Step 3: normalizer로 수량 표현 보정
-    # Claude가 "80만"을 800000으로 못 바꿨거나, 기간 계산이 틀렸을 때 수정
+    # ── Step 3. normalizer로 수량 표현 보정 ──────────────────────────────
+    # Claude가 "80만"을 800000으로 못 바꿨거나,
+    # "3박4일"에서 nights 계산이 틀렸을 때 수정함.
+    # normalizer.py에 정의된 함수들을 사용함.
     claude_parsed = _apply_normalizer(user_input, claude_parsed)
 
-    # Step 4: 유저 프로필 기본값으로 누락 슬롯 채우기
-    # 예: 사용자가 출발지를 안 말했으면 프로필의 default_origin_iata(ICN)로 채움
-    filled_from_profile = []  # 프로필로 채운 필드 추적 (API 명세서 응답에 포함)
+    # ── Step 4. 유저 프로필 기본값으로 누락 슬롯 채우기 ─────────────────
+    # 사용자가 출발지를 안 말했을 때
+    # 프로필의 default_origin_iata(ICN)로 자동으로 채움.
+    # 채운 필드는 filled_from_profile에 기록해서 API 응답에 포함시킴.
+    filled_from_profile = []
     if user_profile:
-        claude_parsed, filled_from_profile = _fill_from_profile(claude_parsed, user_profile)
+        claude_parsed, filled_from_profile = _fill_from_profile(
+            claude_parsed, user_profile
+        )
 
-    # Step 5: warnings 생성
-    # 비현실적인 값이나 주의가 필요한 상황 감지
+    # ── Step 5. warnings 생성 ────────────────────────────────────────────
+    # 비현실적인 값이나 주의가 필요한 상황을 감지해서 warnings 리스트 생성.
+    # 파이프라인 실행을 막지는 않고 사용자에게 알려주는 용도.
+    # 예: "예산이 인원 대비 낮음", "여행 기간이 0박임"
     warnings = _generate_warnings(claude_parsed)
 
-    # Step 6: API 명세서 형식으로 최종 응답 구성
-    # parse_id: 이 파싱 결과를 식별하는 고유 ID
-    # 재질문 답변 병합 시 어떤 파싱 결과에 이어붙일지 식별하는 용도
+    # ── Step 6. API 명세서 형식으로 최종 응답 구성 ───────────────────────
+    # parse_id: 이 파싱 결과를 식별하는 고유 ID.
+    # 재질문 답변 병합(parse/answer/)이나
+    # 파싱 확인(parse/{parse_id}/)에서 어떤 파싱 결과인지 식별하는 용도.
     return {
         "parse_id": f"p_{uuid.uuid4().hex[:8]}",  # 예: "p_a3f2c1d4"
         "fields": {
@@ -157,10 +208,10 @@ def parse_intent(user_input: str, user_profile: dict | None = None) -> dict:
             "themes":       claude_parsed.get("themes", []),
             "dates":        claude_parsed.get("dates", {"start": None, "end": None}),
         },
-        "assumed_fields":    claude_parsed.get("assumed_fields", []),
-        "missing_slots":     claude_parsed.get("missing_slots", []),
+        "assumed_fields":      claude_parsed.get("assumed_fields", []),
+        "missing_slots":       claude_parsed.get("missing_slots", []),
         "filled_from_profile": filled_from_profile,
-        "warnings":          warnings,
+        "warnings":            warnings,
     }
 
 
@@ -169,8 +220,8 @@ def _extract_json(text: str) -> dict:
     Claude 응답 문자열에서 순수 JSON만 추출해서 dict로 변환.
 
     Claude가 지시를 잘 따르면 JSON만 오지만,
-    가끔 ```json ... ``` 마크다운으로 감싸서 보내는 경우가 있어.
-    그 경우를 대비해서 코드블록 마커를 제거하고 파싱.
+    가끔 ```json ... ``` 마크다운으로 감싸서 보내는 경우가 있음.
+    그 경우를 대비해서 코드블록 마커를 제거하고 파싱함.
 
     Args:
         text: Claude API 원본 응답 문자열
@@ -187,7 +238,7 @@ def _extract_json(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        # 파싱 실패 시 원문도 같이 올려서 디버깅하기 쉽게
+        # 파싱 실패 시 원문도 같이 올려서 디버깅하기 쉽게 함
         raise ValueError(f"Claude 응답 JSON 파싱 실패: {e}\n원문:\n{text}")
 
 
@@ -196,7 +247,7 @@ def _apply_normalizer(user_input: str, parsed: dict) -> dict:
     normalizer 함수들로 Claude 파싱 결과를 보정.
 
     Claude가 수량 표현을 놓쳤을 때만 보정하고,
-    이미 값이 있으면 건드리지 않아.
+    이미 값이 있으면 건드리지 않음.
 
     Args:
         user_input: 사용자 원본 입력 (normalizer에 넘겨서 직접 파싱)
@@ -222,8 +273,8 @@ def _apply_normalizer(user_input: str, parsed: dict) -> dict:
             # 첫 번째 목적지에 nights 추가
             destinations[0]["nights"] = duration["nights"]
 
-    # 인원 보정: normalizer가 명확한 표현 찾으면 Claude 결과 덮어씌움
-    # ("혼자", "둘이서" 같은 구어체를 Claude가 놓칠 수 있어서)
+    # 인원 보정: normalizer가 명확한 표현을 찾으면 Claude 결과를 덮어씌움.
+    # "혼자", "둘이서" 같은 구어체를 Claude가 놓칠 수 있어서 추가 처리함.
     headcount = normalize_headcount(user_input)
     if headcount:
         pax = parsed.setdefault("pax", {"adult": 1, "child": 0})
@@ -237,7 +288,7 @@ def _fill_from_profile(parsed: dict, profile: dict) -> tuple[dict, list]:
     유저 프로필의 기본값으로 누락된 슬롯을 채움.
 
     사용자가 출발지를 안 말하는 경우가 많은데,
-    프로필에 default_origin_iata가 있으면 자동으로 채워줘.
+    프로필에 default_origin_iata가 있으면 자동으로 채워줌.
     이렇게 채운 필드는 filled_from_profile에 기록해서
     API 응답에 포함시킴.
 
@@ -270,11 +321,12 @@ def _fill_from_profile(parsed: dict, profile: dict) -> tuple[dict, list]:
 
     return parsed, filled
 
+
 def _generate_warnings(parsed: dict) -> list:
     """
     파싱 결과에서 주의가 필요한 상황을 감지해서 경고 메시지 생성.
 
-    비현실적인 값이나 주의가 필요한 상황을 탐지해서 warnings에 추가.
+    비현실적인 값이나 주의가 필요한 상황을 탐지해서 warnings에 추가함.
     파이프라인 실행을 막지는 않고 사용자에게 알려주는 용도.
     파싱 확인 카드에서 "이런 부분이 이상해요"로 보여줄 수 있음.
 
@@ -296,7 +348,7 @@ def _generate_warnings(parsed: dict) -> list:
     # ── 예산 검증 ────────────────────────────────────────────────────────
 
     if budget is not None:
-        # 예산이 너무 낮은 경우 (1인 기준 최소 10만원)
+        # 예산이 인원 대비 너무 낮은 경우 (1인 기준 최소 10만원)
         if budget < total_pax * 100000:
             warnings.append("예산이 인원 대비 낮음")
 
@@ -326,7 +378,7 @@ def _generate_warnings(parsed: dict) -> list:
 
     nights = None
     if destinations:
-        # destinations 안의 nights 합산
+        # destinations 안의 nights를 합산해서 총 여행 기간 계산
         nights = sum(d.get("nights", 0) or 0 for d in destinations)
 
     if nights is not None:
@@ -346,11 +398,14 @@ def _generate_warnings(parsed: dict) -> list:
 
     # ── 교차 검증 ────────────────────────────────────────────────────────
 
-    # 예산 대비 기간이 너무 긴 경우
-    # (1인 1박 최소 3만원 기준)
+    # 예산 대비 기간이 너무 짧은 경우
+    # 1인 1박 최소 3만원을 기준으로 최소 필요 예산을 계산함
     if budget and nights and total_pax:
         min_required = total_pax * nights * 30000
         if budget < min_required:
-            warnings.append(f"{total_pax}인 {nights}박 기준 예산이 너무 낮음 (최소 {min_required:,}원 권장)")
+            warnings.append(
+                f"{total_pax}인 {nights}박 기준 예산이 너무 낮음 "
+                f"(최소 {min_required:,}원 권장)"
+            )
 
     return warnings
