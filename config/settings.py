@@ -150,3 +150,15 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
 }
+
+# Redis 캐시 설정
+# parse/ API에서 파싱 결과를 session_id 기준으로 임시 저장
+# parse/answer/ API에서 꺼내서 원문과 병합 후 재파싱
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/1"),
+        # DB 1번 사용 (0번은 Celery 브로커용으로 비워둠)
+        "TIMEOUT": 60 * 30,  # 30분 후 자동 삭제 (재질문 흐름은 짧으니까 충분)
+    }
+}
