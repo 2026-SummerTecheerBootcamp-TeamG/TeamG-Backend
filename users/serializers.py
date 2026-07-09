@@ -40,3 +40,11 @@ class LoginSerializer(serializers.Serializer):
             "refresh_token": str(refresh),
             "user_id": user.id,
         }
+
+# 프로필 조회
+class ProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["user_id", "nickname", "email", "nationality", "default_departure"]
+
+    user_id = serializers.IntegerField(source="id")
