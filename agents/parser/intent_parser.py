@@ -270,13 +270,13 @@ def _fill_from_profile(parsed: dict, profile: dict) -> tuple[dict, list]:
 
     return parsed, filled
 
-
 def _generate_warnings(parsed: dict) -> list:
     """
     파싱 결과에서 주의가 필요한 상황을 감지해서 경고 메시지 생성.
 
-    예산이 너무 낮거나 비현실적인 값이 있을 때 warnings에 추가.
+    비현실적인 값이나 주의가 필요한 상황을 탐지해서 warnings에 추가.
     파이프라인 실행을 막지는 않고 사용자에게 알려주는 용도.
+    파싱 확인 카드에서 "이런 부분이 이상해요"로 보여줄 수 있음.
 
     Args:
         parsed: 파싱된 dict
@@ -289,15 +289,68 @@ def _generate_warnings(parsed: dict) -> list:
     budget = parsed.get("budget")
     pax = parsed.get("pax", {})
     adult = pax.get("adult", 1)
+    child = pax.get("child", 0)
+    total_pax = adult + child
     destinations = parsed.get("destinations", [])
 
-    # 예산이 인원 대비 너무 낮은 경우 경고
-    # 1인 기준 최소 여행 예산을 10만원으로 가정
-    if budget and adult and budget < adult * 100000:
-        warnings.append("예산이 인원 대비 낮음")
+    # ── 예산 검증 ────────────────────────────────────────────────────────
+
+    if budget is not None:
+        # 예산이 너무 낮은 경우 (1인 기준 최소 10만원)
+        if budget < total_pax * 100000:
+            warnings.append("예산이 인원 대비 낮음")
+
+        # 예산이 비현실적으로 낮은 경우 (1만원 미만)
+        if budget < 10000:
+            warnings.append("예산이 너무 낮음 (1만원 미만)")
+
+        # 예산이 비현실적으로 높은 경우 (1억 초과)
+        if budget > 100000000:
+            warnings.append("예산이 비현실적으로 높음 (1억 초과)")
+
+    # ── 인원 검증 ────────────────────────────────────────────────────────
+
+    # 성인이 0명인 경우
+    if adult == 0:
+        warnings.append("성인 인원이 0명임")
+
+    # 인원이 비현실적으로 많은 경우 (100명 초과)
+    if total_pax > 100:
+        warnings.append("인원이 비현실적으로 많음 (100명 초과)")
+
+    # 어린이만 있고 성인이 없는 경우
+    if child > 0 and adult == 0:
+        warnings.append("성인 없이 어린이만 있음")
+
+    # ── 기간 검증 ────────────────────────────────────────────────────────
+
+    nights = None
+    if destinations:
+        # destinations 안의 nights 합산
+        nights = sum(d.get("nights", 0) or 0 for d in destinations)
+
+    if nights is not None:
+        # 기간이 0박인 경우
+        if nights == 0:
+            warnings.append("여행 기간이 0박임")
+
+        # 기간이 비현실적으로 긴 경우 (60박 초과)
+        if nights > 60:
+            warnings.append("여행 기간이 비현실적으로 길음 (60박 초과)")
+
+    # ── 목적지 검증 ──────────────────────────────────────────────────────
 
     # 목적지 없이 예산/기간만 있는 경우
     if not destinations and budget:
         warnings.append("목적지가 지정되지 않음")
+
+    # ── 교차 검증 ────────────────────────────────────────────────────────
+
+    # 예산 대비 기간이 너무 긴 경우
+    # (1인 1박 최소 3만원 기준)
+    if budget and nights and total_pax:
+        min_required = total_pax * nights * 30000
+        if budget < min_required:
+            warnings.append(f"{total_pax}인 {nights}박 기준 예산이 너무 낮음 (최소 {min_required:,}원 권장)")
 
     return warnings
