@@ -2,32 +2,42 @@
 자연어 → 구조화 JSON 변환 모듈 (Intent Parser)
 
 이 모듈이 요청 이해 파이프라인의 핵심.
-사용자가 채팅창에 "후쿠오카 3박4일 쇼핑, 80만" 이라고 치면
-이 모듈이 그걸 받아서 아래처럼 구조화된 JSON으로 변환해줌:
+사용자가 채팅창에 "도쿄 2박3일 미식, 30만" 이라고 치면
+이 모듈이 그걸 받아서 API 명세서 형식의 JSON으로 변환해줌:
 
 {
-    "destination": [{"city": "후쿠오카", "city_en": "Fukuoka", 
-                     "country": "일본", "iata": "FUK"}],
-    "origin": {"city": "서울", "iata": "ICN"},
-    "nights": 3,
-    "days": 4,
-    "start_date": null,
-    "end_date": null,
-    "adult": 1,
-    "kid": 0,
-    "budget_total": 800000,
-    "themes": ["쇼핑"],
-    "assumed_fields": ["origin", "adult"],  ← 사용자가 안 말했지만 기본값으로 채운 것
-    "missing_fields": []                    ← 아직 모르는 것 (재질문 대상)
+    "parse_id": "p_1",
+    "fields": {
+        "origin": {"city": "서울", "iata": "ICN"},
+        "destinations": [
+            {
+                "city": "도쿄",
+                "city_en": "Tokyo",
+                "country_code": "JP",
+                "iata": "TYO",
+                "nights": 2
+            }
+        ],
+        "budget": 300000,
+        "pax": {"adult": 1, "child": 0},
+        "themes": ["미식"],
+        "dates": {"start": "2026-03-10", "end": "2026-03-12"}
+    },
+    "assumed_fields": ["origin"],
+    "missing_slots": ["pax"],
+    "filled_from_profile": ["origin"],
+    "warnings": ["예산이 인원 대비 낮음"]
 }
 
 작동 순서:
     1. Claude API에 사용자 입력 전달 → JSON 응답 받기
     2. normalizer로 수량 표현 보정 (Claude가 놓친 "80만" 같은 것)
     3. 유저 프로필로 누락 슬롯 자동 채우기 (출발지 등)
+    4. API 명세서 형식으로 변환해서 반환
 """
 import json
 import re
+import uuid
 
 from agents.claude_client import ask_claude
 from .normalizer import normalize_budget, normalize_duration, normalize_headcount
@@ -43,57 +53,66 @@ SYSTEM_PROMPT = """
 
 출력 스키마:
 {
-    "destination": [
+    "origin": {
+        "city": "출발 도시(한글)",
+        "iata": "출발 공항코드(대문자 3자리)"
+    },
+    "destinations": [
         {
             "city": "도시명(한글)",
             "city_en": "도시명(영어)",
-            "country": "국가명(한글)",
-            "iata": "공항코드(대문자 3자리, 예: FUK, NRT, ICN)"
+            "country_code": "국가코드(대문자 2자리, 예: JP, TH, TW)",
+            "iata": "공항코드(대문자 3자리, 예: FUK, NRT, ICN)",
+            "nights": 숙박일수(정수 또는 null)
         }
     ],
-    "origin": {
-        "city": "출발 도시(한글)",
-        "iata": "출발 공항코드"
+    "budget": 총예산(원 단위 정수 또는 null, 예: 300000),
+    "pax": {
+        "adult": 성인수(정수, 기본 1),
+        "child": 어린이수(정수, 기본 0)
     },
-    "nights": 숙박일수(정수 또는 null),
-    "days": 여행일수(정수 또는 null),
-    "start_date": "YYYY-MM-DD 형식 또는 null",
-    "end_date": "YYYY-MM-DD 형식 또는 null",
-    "adult": 성인수(정수, 기본 1),
-    "kid": 어린이수(정수, 기본 0),
-    "budget_total": 총예산(원 단위 정수 또는 null, 예: 800000),
     "themes": ["테마1", "테마2"],
+    "dates": {
+        "start": "YYYY-MM-DD 형식 또는 null",
+        "end": "YYYY-MM-DD 형식 또는 null"
+    },
     "assumed_fields": ["사용자가 말하지 않아서 기본값으로 채운 필드명 목록"],
-    "missing_fields": ["파이프라인 실행 전에 사용자에게 되물어야 할 필드명 목록"]
+    "missing_slots": ["파이프라인 실행 전에 사용자에게 되물어야 할 필드명 목록"]
 }
 
 규칙:
 - origin을 말하지 않으면 → origin을 null로, assumed_fields에 "origin" 추가
-- 인원을 말하지 않으면 → adult를 1로, assumed_fields에 "adult" 추가
-- 날짜/기간을 말하지 않으면 → missing_fields에 "nights" 추가
-- 예산을 말하지 않으면 → missing_fields에 "budget_total" 추가
-- 목적지를 말하지 않으면 → missing_fields에 "destination" 추가
+- 인원을 말하지 않으면 → pax.adult를 1로, assumed_fields에 "pax" 추가
+- 날짜/기간을 말하지 않으면 → missing_slots에 "dates" 추가
+- 예산을 말하지 않으면 → missing_slots에 "budget" 추가
+- 목적지를 말하지 않으면 → missing_slots에 "destinations" 추가
 - 테마 예시: 쇼핑, 맛집, 관광, 휴양, 액티비티, 문화
-- "80만"은 800000으로 변환, "3박4일"은 nights=3, days=4로 변환
+- "80만"은 800000으로 변환
+- "3박4일"은 destinations[0].nights=3으로 변환
+- 목적지가 명확하게 있으면 반드시 destinations 배열에 넣어. 절대 비워두지 마.
+- "후쿠오카"는 {"city": "후쿠오카", "city_en": "Fukuoka", "country_code": "JP", "iata": "FUK"}
+- "도쿄"는 {"city": "도쿄", "city_en": "Tokyo", "country_code": "JP", "iata": "TYO"}
+- "오사카"는 {"city": "오사카", "city_en": "Osaka", "country_code": "JP", "iata": "KIX"}
+- "방콕"은 {"city": "방콕", "city_en": "Bangkok", "country_code": "TH", "iata": "BKK"}
 """
 
 
 def parse_intent(user_input: str, user_profile: dict | None = None) -> dict:
     """
-    자연어 입력을 구조화 JSON으로 변환하는 메인 함수.
+    자연어 입력을 API 명세서 형식의 구조화 JSON으로 변환하는 메인 함수.
 
     ChatInput 컴포넌트에서 사용자가 메시지를 보내면
     views.py가 이 함수를 호출해서 파싱 결과를 돌려받아.
 
     Args:
         user_input: 사용자가 채팅창에 입력한 자연어 문자열
-                    예: "후쿠오카 3박4일 쇼핑, 80만"
+                    예: "도쿄 2박3일 미식, 30만"
         user_profile: 로그인한 유저의 기본 설정값
                       예: {"origin_iata": "ICN", "nationality": "KR"}
                       None이면 프로필 채우기 스킵
 
     Returns:
-        구조화된 파싱 결과 dict (스키마는 모듈 docstring 참고)
+        API 명세서 형식의 파싱 결과 dict
 
     Raises:
         ValueError: Claude 응답이 JSON 형식이 아닐 때
@@ -109,18 +128,40 @@ def parse_intent(user_input: str, user_profile: dict | None = None) -> dict:
 
     # Step 2: 응답 문자열에서 JSON 파싱
     # Claude가 가끔 ```json ... ``` 형식으로 감싸서 보내는 경우가 있어서 방어 처리
-    parsed = _extract_json(raw_response)
+    claude_parsed = _extract_json(raw_response)
 
     # Step 3: normalizer로 수량 표현 보정
     # Claude가 "80만"을 800000으로 못 바꿨거나, 기간 계산이 틀렸을 때 수정
-    parsed = _apply_normalizer(user_input, parsed)
+    claude_parsed = _apply_normalizer(user_input, claude_parsed)
 
     # Step 4: 유저 프로필 기본값으로 누락 슬롯 채우기
     # 예: 사용자가 출발지를 안 말했으면 프로필의 default_origin_iata(ICN)로 채움
+    filled_from_profile = []  # 프로필로 채운 필드 추적 (API 명세서 응답에 포함)
     if user_profile:
-        parsed = _fill_from_profile(parsed, user_profile)
+        claude_parsed, filled_from_profile = _fill_from_profile(claude_parsed, user_profile)
 
-    return parsed
+    # Step 5: warnings 생성
+    # 비현실적인 값이나 주의가 필요한 상황 감지
+    warnings = _generate_warnings(claude_parsed)
+
+    # Step 6: API 명세서 형식으로 최종 응답 구성
+    # parse_id: 이 파싱 결과를 식별하는 고유 ID
+    # 재질문 답변 병합 시 어떤 파싱 결과에 이어붙일지 식별하는 용도
+    return {
+        "parse_id": f"p_{uuid.uuid4().hex[:8]}",  # 예: "p_a3f2c1d4"
+        "fields": {
+            "origin":       claude_parsed.get("origin"),
+            "destinations": claude_parsed.get("destinations", []),
+            "budget":       claude_parsed.get("budget"),
+            "pax":          claude_parsed.get("pax", {"adult": 1, "child": 0}),
+            "themes":       claude_parsed.get("themes", []),
+            "dates":        claude_parsed.get("dates", {"start": None, "end": None}),
+        },
+        "assumed_fields":    claude_parsed.get("assumed_fields", []),
+        "missing_slots":     claude_parsed.get("missing_slots", []),
+        "filled_from_profile": filled_from_profile,
+        "warnings":          warnings,
+    }
 
 
 def _extract_json(text: str) -> dict:
@@ -164,61 +205,99 @@ def _apply_normalizer(user_input: str, parsed: dict) -> dict:
     Returns:
         보정된 parsed dict
     """
-    # 예산 보정: Claude가 budget_total을 null로 반환했을 때만 시도
-    if not parsed.get("budget_total"):
+    # 예산 보정: Claude가 budget을 null로 반환했을 때만 시도
+    if not parsed.get("budget"):
         budget = normalize_budget(user_input)
         if budget:
-            parsed["budget_total"] = budget
-            # normalizer가 찾았으니 missing_fields에서 제거
-            if "budget_total" in parsed.get("missing_fields", []):
-                parsed["missing_fields"].remove("budget_total")
+            parsed["budget"] = budget
+            # normalizer가 찾았으니 missing_slots에서 제거
+            if "budget" in parsed.get("missing_slots", []):
+                parsed["missing_slots"].remove("budget")
 
-    # 기간 보정: nights가 없을 때만 시도
-    if not parsed.get("nights"):
+    # 기간 보정: destinations[0].nights가 없을 때만 시도
+    destinations = parsed.get("destinations", [])
+    if destinations and not destinations[0].get("nights"):
         duration = normalize_duration(user_input)
         if duration:
-            parsed["nights"] = duration["nights"]
-            parsed["days"] = duration["days"]
+            # 첫 번째 목적지에 nights 추가
+            destinations[0]["nights"] = duration["nights"]
 
     # 인원 보정: normalizer가 명확한 표현 찾으면 Claude 결과 덮어씌움
     # ("혼자", "둘이서" 같은 구어체를 Claude가 놓칠 수 있어서)
     headcount = normalize_headcount(user_input)
     if headcount:
-        parsed["adult"] = headcount
+        pax = parsed.setdefault("pax", {"adult": 1, "child": 0})
+        pax["adult"] = headcount
 
     return parsed
 
 
-def _fill_from_profile(parsed: dict, profile: dict) -> dict:
+def _fill_from_profile(parsed: dict, profile: dict) -> tuple[dict, list]:
     """
     유저 프로필의 기본값으로 누락된 슬롯을 채움.
 
     사용자가 출발지를 안 말하는 경우가 많은데,
     프로필에 default_origin_iata가 있으면 자동으로 채워줘.
-    이렇게 채운 필드는 assumed_fields에 기록해서
-    파싱 확인 카드에서 "이렇게 가정했어요"로 보여줄 수 있어.
+    이렇게 채운 필드는 filled_from_profile에 기록해서
+    API 응답에 포함시킴.
 
     Args:
         parsed: 현재까지 파싱된 dict
         profile: 유저 기본 설정 {"origin_iata": "ICN", "nationality": "KR"}
 
     Returns:
-        프로필 값이 채워진 parsed dict
+        (프로필 값이 채워진 parsed dict, 프로필로 채운 필드 목록)
     """
+    filled = []  # 프로필로 채운 필드 목록
+
     # 출발지가 없고 프로필에 기본 출발지가 있으면 채우기
     if not parsed.get("origin") and profile.get("origin_iata"):
         parsed["origin"] = {
-            "city": None,  # 도시명은 나중에 코드 매핑에서 채움
+            "city": None,   # 도시명은 나중에 코드 매핑에서 채움
             "iata": profile["origin_iata"],
         }
+        filled.append("origin")
+
         # assumed_fields 리스트에 "origin" 추가 (없으면 리스트 새로 만들기)
         assumed = parsed.setdefault("assumed_fields", [])
         if "origin" not in assumed:
             assumed.append("origin")
 
-        # missing_fields에서는 제거 (이제 채웠으니까)
-        missing = parsed.get("missing_fields", [])
+        # missing_slots에서는 제거 (이제 채웠으니까)
+        missing = parsed.get("missing_slots", [])
         if "origin" in missing:
             missing.remove("origin")
 
-    return parsed
+    return parsed, filled
+
+
+def _generate_warnings(parsed: dict) -> list:
+    """
+    파싱 결과에서 주의가 필요한 상황을 감지해서 경고 메시지 생성.
+
+    예산이 너무 낮거나 비현실적인 값이 있을 때 warnings에 추가.
+    파이프라인 실행을 막지는 않고 사용자에게 알려주는 용도.
+
+    Args:
+        parsed: 파싱된 dict
+
+    Returns:
+        경고 메시지 문자열 리스트 (없으면 빈 리스트)
+    """
+    warnings = []
+
+    budget = parsed.get("budget")
+    pax = parsed.get("pax", {})
+    adult = pax.get("adult", 1)
+    destinations = parsed.get("destinations", [])
+
+    # 예산이 인원 대비 너무 낮은 경우 경고
+    # 1인 기준 최소 여행 예산을 10만원으로 가정
+    if budget and adult and budget < adult * 100000:
+        warnings.append("예산이 인원 대비 낮음")
+
+    # 목적지 없이 예산/기간만 있는 경우
+    if not destinations and budget:
+        warnings.append("목적지가 지정되지 않음")
+
+    return warnings
