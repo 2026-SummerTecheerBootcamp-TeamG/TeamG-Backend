@@ -6,7 +6,7 @@ budget_demo.py - 예산 에이전트 동작 확인용 데모
 import json
 import logging
 
-from budget import allocate_budget
+from agents.budget import allocate_budget
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")   # 로그를 화면에 보이게
 
