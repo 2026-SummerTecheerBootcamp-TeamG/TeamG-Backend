@@ -50,16 +50,6 @@ def search_flights(departure_id: str, arrival_id: str,
                    adults: int = 1) -> list[dict]:
     """
     SerpApi(Google Flights)로 왕복 항공권을 검색한다.
-
-    Args:
-        departure_id: 출발 공항코드 (예: "ICN")
-        arrival_id: 도착 공항코드 (예: "FUK")
-        outbound_date: 가는 날 "YYYY-MM-DD"
-        return_date: 오는 날 "YYYY-MM-DD"
-        adults: 성인 인원
-
-    Returns:
-        항공권 옵션 리스트 (SerpApi 원본 형식)
     """
     params = {
         "engine": "google_flights",
@@ -84,6 +74,46 @@ def search_flights(departure_id: str, arrival_id: str,
     return (data.get("best_flights") or []) + (data.get("other_flights") or [])
 
 
+def parse_flight(raw_flight: dict) -> dict:
+    """
+    SerpApi 항공편 원본을 우리 후보 형식으로 변환한다.
+    """
+    flights = raw_flight["flights"]        # 구간 목록 (경유 있으면 여러 개)
+
+    # 직항 여부: 구간이 1개면 직항
+    is_direct = len(flights) == 1
+
+    # 출발 시각: 첫 구간의 출발 시간 "2026-08-09 12:30" → 12
+    departure_time = flights[0]["departure_airport"]["time"]
+    departure_hour = int(departure_time.split(" ")[1].split(":")[0])
+
+    # 도착 시각: 마지막 구간의 도착 시간 → 시(hour)
+    arrival_time = flights[-1]["arrival_airport"]["time"]
+    arrival_hour = int(arrival_time.split(" ")[1].split(":")[0])
+
+    return make_candidate(
+        airline=flights[0]["airline"],
+        krw=raw_flight["price"],
+        is_direct=is_direct,
+        departure_hour=departure_hour,
+        arrival_hour=arrival_hour,
+    )
+
+
+def get_flight_candidates(departure_id: str, arrival_id: str,
+                          outbound_date: str, return_date: str,
+                          adults: int = 1, top_n: int = 5) -> list[dict]:
+    """
+    항공권을 검색하고, 가격순으로 상위 N개 후보를 반환한다.
+    (검색 → 변환 → 정렬 → 추리기)
+    """
+    raw_results = search_flights(departure_id, arrival_id,
+                                 outbound_date, return_date, adults)
+    candidates = [parse_flight(f) for f in raw_results]
+    candidates.sort(key=lambda c: c["krw"])   # 가격 낮은 순
+    return candidates[:top_n]
+
+
 # 테스트용
 if __name__ == "__main__":
     # 여정 테스트
@@ -98,17 +128,14 @@ if __name__ == "__main__":
     # 후보 변환 테스트
     print(make_candidate("이스타항공", 442378, True, 10, 14))
 
-    # SerpApi 실제 검색 테스트
-    print("\n--- SerpApi 검색 ---")
-    results = search_flights(
+    # 전체 파이프라인 테스트: 검색 → 변환 → 정렬 → 5개
+    print("\n--- 최종 후보 (가격순 5개) ---")
+    top5 = get_flight_candidates(
         departure_id="ICN",
         arrival_id="FUK",
         outbound_date="2026-08-09",
         return_date="2026-08-12",
         adults=2,
     )
-    print(f"검색된 항공편: {len(results)}개")
-    if results:
-        print("첫 번째 항공편 원본:")
-        import json
-        print(json.dumps(results[0], indent=2, ensure_ascii=False))
+    for c in top5:
+        print(c)
