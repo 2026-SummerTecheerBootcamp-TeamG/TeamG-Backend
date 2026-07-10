@@ -105,12 +105,16 @@ def get_flight_candidates(departure_id: str, arrival_id: str,
                           adults: int = 1, top_n: int = 5) -> list[dict]:
     """
     항공권을 검색하고, 가격순으로 상위 N개 후보를 반환한다.
-    (검색 → 변환 → 정렬 → 추리기)
+    검색 결과가 0건이면 빈 리스트를 반환한다.
     """
     raw_results = search_flights(departure_id, arrival_id,
                                  outbound_date, return_date, adults)
+
+    if not raw_results:
+        return []   # 항공 0건 → 예산 에이전트가 no_flights 처리
+
     candidates = [parse_flight(f) for f in raw_results]
-    candidates.sort(key=lambda c: c["krw"])   # 가격 낮은 순
+    candidates.sort(key=lambda c: c["krw"])
     return candidates[:top_n]
 
 
