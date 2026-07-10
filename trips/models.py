@@ -25,7 +25,6 @@ class TripRequest(models.Model):
         on_delete=models.CASCADE,   # 부모(User)가 삭제되면 같이 삭제
         related_name="trip_requests",
     )
-
     departure = models.CharField(max_length=100)    # 출발 도시 표시명 ("서울")
     origin_iata = models.CharField(max_length=3, null=True, blank=True) # 출발 공항 "ICN"
     start_date = models.DateField()     # 여행 시작일
@@ -161,14 +160,12 @@ class Flight(models.Model):
         on_delete=models.CASCADE,
         related_name="flight",
     )
-    offer_id = models.CharField(max_length=100)     # Duffel 오퍼 ID
     airline = models.CharField(max_length=100)      # 항공사명
     price_krw = models.PositiveIntegerField()       # 원화 가격
     price_original = models.DecimalField(max_digits=10, decimal_places=2)   # 원통화 가격
     currency = models.CharField(max_length=3)                               # 통화 코드
     utility = models.DecimalField(max_digits=5, decimal_places=1, null=True, blank=True)    # 만족도 점수
     utility_reasons = models.JSONField(null=True, blank=True)   # 점수 근거 배열
-    expires_at = models.DateTimeField()                         # 오퍼 만료 시각
     slices = models.JSONField(null=True, blank=True)            # 구간 상세
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

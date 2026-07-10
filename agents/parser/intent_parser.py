@@ -389,6 +389,25 @@ def _generate_warnings(parsed: dict) -> list:
         # 기간이 비현실적으로 긴 경우 (60박 초과)
         if nights > 60:
             warnings.append("여행 기간이 비현실적으로 길음 (60박 초과)")
+        # ── 다중 목적지 검증 ─────────────────────────────────────────────────
+
+    # 목적지가 2개 이상인 경우 각 목적지의 nights 합산 검증
+    if len(destinations) > 1:
+        # nights가 없는 목적지 확인
+        missing_nights = [
+            d.get("city", "알 수 없는 도시")
+            for d in destinations
+            if not d.get("nights")
+        ]
+        if missing_nights:
+            warnings.append(
+                f"숙박 일수가 지정되지 않은 목적지 있음: {', '.join(missing_nights)}"
+            )
+
+        # 총 nights 합산
+        total_nights = sum(d.get("nights", 0) or 0 for d in destinations)
+        if total_nights > 60:
+            warnings.append(f"총 여행 기간이 너무 길음 ({total_nights}박)")
 
     # ── 목적지 검증 ──────────────────────────────────────────────────────
 
