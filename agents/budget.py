@@ -134,7 +134,7 @@ def allocate_budget(
             dc = o["krw"] - sel["hotel"]["krw"]
             du = o.get("utility", DEFAULT_UTILITY) - sel["hotel"].get("utility", DEFAULT_UTILITY)
             if dc > 0 and du > 0 and dc <= remaining:
-                moves.append({"category": "숙소", "apply": ("hotel", 0), "to": o["label"],
+                moves.append({"category": "숙소", "apply": ("hotel", o), "to": o["label"],
                               "cost_delta": dc, "utility_delta": du})
                 
         # 활동: 바로 위 등급으로 한 단계씩만
