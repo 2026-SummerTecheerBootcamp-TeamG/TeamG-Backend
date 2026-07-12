@@ -47,6 +47,9 @@ class HotelStaticInfo:
     name: Optional[str] = None
     star_rating: Optional[int] = None
     facilities: List[str] = field(default_factory=list)
+    # 위치 정보 강화(location_enricher.py)에서 동선 거리 계산에 사용
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class LiteAPIClient:
@@ -145,5 +148,7 @@ class LiteAPIClient:
                 name=entry.get("name"),
                 star_rating=entry.get("starRating"),
                 facilities=entry.get("hotelFacilities") or [],
+                latitude=entry.get("latitude"),
+                longitude=entry.get("longitude"),
             )
         return result
