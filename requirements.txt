@@ -33,5 +33,4 @@ sqlparse==0.5.5
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 uritemplate==4.2.0
-anthropic==0.116.0
 mcp==1.28.1
