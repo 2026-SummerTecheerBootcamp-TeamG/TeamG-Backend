@@ -162,3 +162,24 @@ CACHES = {
         "TIMEOUT": 60 * 30,  # 30분 후 자동 삭제 (재질문 흐름은 짧으니까 충분)
     }
 }
+
+# Celery 설정
+# 브로커: 작업 주문서가 쌓이는 대기열. docker-compose의 RabbitMQ 컨테이너
+# "amqp://계정:비밀번호@주소:포트//" 형식
+# 마지막 //는 기본 가상호스트(vhost)라는 뜻
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL", "amqp://guest:guest@localhost:5672//"
+)
+
+# 결과 백엔드: 태스크 실행 결과가 저장되는 곳
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND", "redis://localhost:6379/0"
+)
+
+# 주문서/결과를 JSON으로만 주고받기
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+
+# 결과를 Redis에 1시간만 보관 후 자동 삭제
+CELERY_RESULT_EXPIRES = 60 * 60
