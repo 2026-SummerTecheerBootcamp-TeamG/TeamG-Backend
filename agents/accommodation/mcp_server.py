@@ -51,6 +51,12 @@ from agents.accommodation.services.candidate_scorer import (
     score_candidates,
     merge_candidates_with_static_info,
 )
+from agents.accommodation.services.city_date_splitter import (
+    split_city_dates,
+    to_search_params,
+    CityDateSplitError,
+)
+from datetime import date
 
 
 # MCP 서버 인스턴스 생성. "accommodation-agent"라는 이름으로 등록됨
@@ -209,6 +215,44 @@ def accommodation_score_candidates(
     scored = score_candidates(merged, theme=theme)
 
     return {"scored_candidates": [s.to_dict() for s in scored]}
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: 도시 기반 검색 조건 (여러 도시 방문 시 날짜 분할)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def accommodation_split_city_dates(
+    trip_start_date: str,
+    city_nights: list[dict],
+) -> dict:
+    """
+    여러 도시를 방문하는 여행에서, 여행 시작일과 도시별 숙박 일수를 받아
+    각 도시의 실제 체크인/체크아웃 날짜를 계산한다.
+
+    사용자가 "오사카 2박, 교토 1박"처럼 도시별 박 수로 말했을 때,
+    실제 날짜가 필요한 accommodation_search_hotels를 도시마다 호출하기 전에
+    이 tool을 먼저 호출해서 각 도시의 checkin/checkout을 얻어야 한다.
+    (도시가 1개뿐이면 이 tool 없이 바로 accommodation_search_hotels를 써도 된다.)
+
+    Args:
+        trip_start_date: 여행 전체 시작일 "YYYY-MM-DD"
+        city_nights: 방문 순서대로 [{"city": "오사카", "nights": 2}, ...]
+                     nights는 1 이상
+
+    Returns:
+        성공 시: {"stays": [{"city":.., "checkin":.., "checkout":..}, ...]}
+        실패 시: {"error": "에러 메시지"}
+    """
+    try:
+        year, month, day = map(int, trip_start_date.split("-"))
+        start = date(year, month, day)
+        stays = split_city_dates(trip_start_date=start, city_nights=city_nights)
+        return {"stays": to_search_params(stays)}
+    except CityDateSplitError as e:
+        return {"error": str(e)}
+    except (ValueError, TypeError) as e:
+        return {"error": f"trip_start_date 형식이 잘못됐습니다 (YYYY-MM-DD 필요): {e}"}
 
 
 if __name__ == "__main__":
