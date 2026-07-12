@@ -33,7 +33,9 @@ import sys
 
 # 이 파일 기준으로 상위 폴더(프로젝트 루트)를 import 경로에 추가
 # (mcp_server.py를 단독으로 실행해도 agents.accommodation... import가 되도록)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+# mcp_server.py는 agents/accommodation/ 바로 아래에 있으므로, 2단계만 올라가면
+# 프로젝트 루트(manage.py가 있는 곳)에 도달함
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from mcp.server.fastmcp import FastMCP
 
@@ -275,10 +277,18 @@ def accommodation_enrich_location(
     보강할 수 있다. 호텔 좌표 조회를 위해 LiteAPI 정적 정보를 내부적으로
     다시 조회한다.
 
+    ⚠️ 중요: pois 파라미터는 반드시 일정 에이전트가 실제로 계산한 좌표만
+    사용해야 한다. 정확한 좌표를 모른다면, 스스로 좌표를 추측/생성해서
+    이 tool을 호출하지 말 것. 잘못된 좌표로 계산된 "도보 N분" 정보는
+    사실이 아닌데 사실처럼 보이는 형태로 사용자에게 전달되어 위험하다.
+    일정 에이전트의 좌표 데이터가 아직 없다면, 이 tool을 호출하지 않고
+    accommodation_score_candidates의 결과만으로 답변하는 것이 안전하다.
+
     Args:
         scored_candidates: accommodation_score_candidates의 결과
                             (각 원소에 hotel_id가 있어야 함)
-        pois: 일정 동선 상의 관심 장소들
+        pois: 일정 동선 상의 관심 장소들. 반드시 일정 에이전트가 제공한
+              실제 좌표여야 함 (임의로 추측한 좌표 사용 금지)
               [{"name": "신사이바시 쇼핑거리", "latitude": 34.67, "longitude": 135.50}, ...]
 
     Returns:
