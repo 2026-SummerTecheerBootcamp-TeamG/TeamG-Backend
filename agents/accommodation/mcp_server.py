@@ -56,6 +56,9 @@ from agents.accommodation.services.city_date_splitter import (
     to_search_params,
     CityDateSplitError,
 )
+from agents.accommodation.services.location_enricher import (
+    enrich_candidates_with_location,
+)
 from datetime import date
 
 
@@ -253,6 +256,53 @@ def accommodation_split_city_dates(
         return {"error": str(e)}
     except (ValueError, TypeError) as e:
         return {"error": f"trip_start_date 형식이 잘못됐습니다 (YYYY-MM-DD 필요): {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: 후보 품질 (위치 정보 강화 - 동선 거리)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def accommodation_enrich_location(
+    scored_candidates: list[dict],
+    pois: list[dict],
+) -> dict:
+    """
+    호텔 후보들에 "OO까지 도보 몇 분" 같은 위치 근거를 추가한다.
+
+    accommodation_score_candidates 실행 후, 일정 에이전트가 만든 동선 상의
+    관심 장소(POI) 목록이 있으면 이 tool을 호출해서 각 후보에 위치 근거를
+    보강할 수 있다. 호텔 좌표 조회를 위해 LiteAPI 정적 정보를 내부적으로
+    다시 조회한다.
+
+    Args:
+        scored_candidates: accommodation_score_candidates의 결과
+                            (각 원소에 hotel_id가 있어야 함)
+        pois: 일정 동선 상의 관심 장소들
+              [{"name": "신사이바시 쇼핑거리", "latitude": 34.67, "longitude": 135.50}, ...]
+
+    Returns:
+        {"insights": [{"hotel_id":.., "nearest_poi_name":.., "distance_km":..,
+                        "walking_minutes":.., "reason":..}, ...]}
+    """
+    if not scored_candidates:
+        return {"insights": []}
+
+    client = _get_liteapi_client()
+    hotel_ids = [c["hotel_id"] for c in scored_candidates]
+    static_info_by_id = client.get_hotel_static_info(hotel_ids)
+
+    hotels_with_coords = [
+        {
+            "hotel_id": hid,
+            "latitude": static_info_by_id[hid].latitude if hid in static_info_by_id else None,
+            "longitude": static_info_by_id[hid].longitude if hid in static_info_by_id else None,
+        }
+        for hid in hotel_ids
+    ]
+
+    insights = enrich_candidates_with_location(hotels_with_coords, pois)
+    return {"insights": [i.to_dict() for i in insights]}
 
 
 if __name__ == "__main__":
