@@ -19,6 +19,7 @@
 """
 
 import anthropic
+import json
 
 from agents.claude_client import DEFAULT_MODEL  # 팀 공용 모델명 재사용
 from agents.mcp_client import ToolHub
@@ -54,7 +55,35 @@ def _extract_final_text(response):
     return "\n".join(b.text for b in response.content if b.type == "text")
 
 
-async def run_agent_loop(run_id, user_message):
+def _collect_candidates(tool_name, result_text, collected):
+    """
+    검색 툴의 응답에서 후보 리스트를 코드가 직접 수집
+    """
+
+    try:
+        data = json.loads(result_text)
+    except (ValueError, TypeError):
+        return
+    
+    if tool_name == "flight_search_candidates":
+        # 항공 후보는 이미 예산 엔진 입력 형식과 동일
+        collected["flight_options"] = data.get("candidates", [])
+
+    elif tool_name == "accommodation_score_candidates":
+        # 숙소 후보는 키가 다름
+        collected["hotel_options"] = [
+            {
+                "label": c.get("hotel_id"),
+                "krw": c.get("krw"),
+                "utility": c.get("utility"),
+                "raw": c,
+            }
+            for c in data.get("scored_candidates", [])
+        ]
+
+
+async def run_agent_loop(run_id, user_message, collected=None, finish_trace=True):
+    
     """
     자연어 요청 -> (Claude 판단 <-> 툴 실행)* -> 최종 답변 문자열
     
@@ -90,7 +119,8 @@ async def run_agent_loop(run_id, user_message):
             if not tool_uses:
                 # 툴 요청이 없음 = Claude가 이제 답할 수 있다고 판단한 것
                 final_text = _extract_final_text(response)
-                trace.done(run_id, f"총 {turn}턴에 완료")
+                if finish_trace:
+                    trace.done(run_id, f"총 {turn}턴에 완료")
                 return final_text
             
             # Claude가 요청한 툴들을 실행하고, 결과를 tool_result 형식으로 수집
@@ -99,6 +129,9 @@ async def run_agent_loop(run_id, user_message):
                 # block.name = 툴 이름
                 # block.id = 이 호출의 고유 번호
                 result_text = await hub.call(block.name, block.input)
+                # 검색 툴 응답이면 후보를 원본 그대로 수집
+                if collected is not None:
+                    _collect_candidates(block.name, result_text, collected)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
