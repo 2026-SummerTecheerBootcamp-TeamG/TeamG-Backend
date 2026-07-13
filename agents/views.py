@@ -26,7 +26,7 @@ import uuid
 # AsyncResult: task_id로 Celery 결과 백엔드에서 상태/결과를 조회하는 클래스
 from celery.result import AsyncResult
 
-from agents.tasks import run_orchestrator
+from agents.tasks import run_orchestrator, run_full_pipeline
 from agents.trace import get_events
 
 
@@ -433,8 +433,13 @@ def parse_correct(request, parse_id):
 
 class RunCreateSerializer(serializers.Serializer):
     """Swagger 문서용 실행 접수 요청 바디 스키마"""
+    parse_id = serializers.CharField(
+        required=False, allow_blank=True,
+        help_text="확정(confirm)된 파싱 ID -> 풀 파이프라인 실행 (권장)"
+    )
     message = serializers.CharField(
-        help_text="여행 요청 자연어 (예: 성인 2명 8월 1~3일 오사카, 항공권과 호텔 추천)"
+        required=False, allow_blank=True,
+        help_text="자연어 요청 -> 검색 단계만 실행 (데모/디버깅용)"
     )
 
 
@@ -455,17 +460,45 @@ def run_create(request):
     Response 400: {"error": "message 필드가 필요합니다."}
     """
     
-    # 1. 요청에서 message 꺼내기
+    # 1. parse_id 우선, 없으면 message 꺼내기
+    parse_id = request.data.get("parse_id", "").strip()
     message = request.data.get("message", "").strip()
-    if not message:
+
+    if not parse_id and not message:
         return Response(
-            {"error": "message 필드가 필요합니다."},
+            {"error": "parse_id 또는 message 중 하나가 필요합니다."},
             status=status.HTTP_400_BAD_REQUEST,
         )
     
-    # 2. run_id 발급 + 태스크 접수
     run_id = uuid.uuid4().hex[:12]
-    async_result = run_orchestrator.delay(run_id, message)
+
+    # 2. 실행 경로 선택
+    if parse_id:
+        # 확정된 파싱 결과 -> 풀 파이프라인
+        cached = cache.get(f"parse:{parse_id}")
+        if not cached:
+            return Response(
+                {"error": "파싱 결과를 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not cached.get("confirmed"):
+            # 확인 카드에서 확정을 안 누른 요청은 실행 금지
+            return Response(
+                {"error": "확정되지 않은 파싱입니다. confirm을 먼저 호출하세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        fields = cached["parsed"]["fields"]
+        dates = fields.get("dates") or {}
+        if not dates.get("start") or not dates.get("end"):
+            return Response(
+                {"error": "여행 날짜가 없습니다. 날짜를 포함해 다시 요청해 주세요. (예: 8월 1일부터 3일까지)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        nationality = getattr(request.user, "nationality", None)
+        async_result = run_full_pipeline.delay(run_id, fields, nationality)
+    else:
+        # 자연어 직접 입력
+        async_result = run_orchestrator.delay(run_id, message)
 
     # 3. run_id -> task_id 매핑을 캐시에 저장
     # trace는 run_id 기준, Celery 결과는 task_id 기준으로 저장됨
@@ -514,17 +547,17 @@ def run_detail(request, run_id):
 
     if async_result.state == "SUCCESS":
         run_status = "completed"
-        answer = async_result.result.get("answer")
+        result_payload = async_result.result
     elif async_result.state == "FAILURE":
         run_status = "failed"
-        asnwer = None
+        result_payload = None
     else:
         run_status = "running"
-        answer = None
+        result_payload = None
 
     return Response({
         "run_id": run_id,
         "status": run_status,
         "events": events,
-        "answer": answer,
+        "answer": result_payload,
     })
