@@ -3,7 +3,7 @@
 실제 SerpApi 호출 없이, 가짜 항공 후보로 예산 배분이 도는지 확인한다.
 """
 
-from agents.flight import make_candidate
+from agents.flight.flight import make_candidate
 from agents.budget import allocate_budget
 
 
