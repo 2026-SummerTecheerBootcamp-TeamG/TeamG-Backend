@@ -113,7 +113,12 @@ def get_flight_candidates(departure_id: str, arrival_id: str,
     if not raw_results:
         return []   # 항공 0건 → 예산 에이전트가 no_flights 처리
 
-    candidates = [parse_flight(f) for f in raw_results]
+    candidates = [
+        parse_flight(f) for f in raw_results
+        if f.get("price")
+    ]
+    if not candidates:
+        return []   # 전부 가격 없는 편이었던 경우도 0건으로 정상 처리
     candidates.sort(key=lambda c: c["krw"])
     return candidates[:top_n]
 
