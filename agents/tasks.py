@@ -56,7 +56,7 @@ def run_orchestrator(run_id, user_message):
 
 
 @shared_task(name="agents.run_full_pipeline")
-def run_full_pipeline(run_id, fields, nationality=None):
+def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
     """
     확정된 파싱 결과로 전체 파이프라인을 실행하는 태스크
     
@@ -134,9 +134,7 @@ def run_full_pipeline(run_id, fields, nationality=None):
         plan_data["city"], themes, plan_data["day_plan"]
     )
 
-    trace.done(run_id, "풀 파이프라인 완료")
-
-    return {
+    result = {
         "run_id": run_id,
         "search_summary": search_summary,
         "flight_options": flight_options,
@@ -146,15 +144,16 @@ def run_full_pipeline(run_id, fields, nationality=None):
         "day_plan": plan_data["day_plan"],
         "narrative": narrative,
     }
-    오케스트레이터를 워커에서 실행하는 태스크
-    
-    왜 필요한가
-        run_agent_loop는 20초 이상 걸릴 수 있는 작업
-        웹 요청 처리 중에 직접 부르면 사용자가 빈 화면을 20초 보게 되므로 API는 이 태스크를 큐에 넣고 runId만 즉시 돌려줌
-        진행 상황은 trace 방송으로, 최종 결과는 이 태스크의 반환값으로 조회
 
-    반환값은 결과 백엔드(Redis DB 0)에 JSON으로 저장
-    """
+    # 5. DB 저장
+    if plan_id:
+        # Django 모델은 함수 "안"에서 import 하는 게 의도적
+        # 이 모듈은 Django 밖에서도 import 되는데, 모델을 파일 맨 위에서 import하면 그 순간 Django 초기화가 필요해져서 데모가 죽음
+        # 워커에서는 Celery의 Django 연동이 초기화해 줌
+        from trips.services import save_pipeline_result
+        save_pipeline_result(plan_id, result)
+        trace.publish(run_id, "db", "postgres", "플랜 저장 완료 (draft)",
+                      f"plan_id={plan_id}")
 
-    answer = asyncio.run(run_agent_loop(run_id, user_message))
-    return {"run_id": run_id, "answer": answer}
+    trace.done(run_id, "풀 파이프라인 완료")
+    return result
