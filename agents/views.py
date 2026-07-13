@@ -21,6 +21,14 @@ from django.core.cache import cache
 
 from agents.parser import parse_intent, validate_slots
 
+import uuid
+
+# AsyncResult: task_id로 Celery 결과 백엔드에서 상태/결과를 조회하는 클래스
+from celery.result import AsyncResult
+
+from agents.tasks import run_orchestrator
+from agents.trace import get_events
+
 
 class ParseRequestSerializer(serializers.Serializer):
     """
@@ -420,4 +428,103 @@ def parse_correct(request, parse_id):
         "parse_id": parsed.get("parse_id"),
         "status":   "corrected",
         "fields":   parsed.get("fields"),
+    })
+
+
+class RunCreateSerializer(serializers.Serializer):
+    """Swagger 문서용 실행 접수 요청 바디 스키마"""
+    message = serializers.CharField(
+        help_text="여행 요청 자연어 (예: 성인 2명 8월 1~3일 오사카, 항공권과 호텔 추천)"
+    )
+
+
+
+@extend_schema(request=RunCreateSerializer)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def run_create(request):
+    """
+    오케스트레이터 실행 접수 엔드포인트
+    
+    pipeline_demo가 하던 일을 HTTP로 옮긴 것:
+    run_id 발급 -> 태스크를 큐에 접수 -> 즉시 202 반환
+    실제 실행은 Celery 워커에서 진행되고, 프론트는 응답의 run_id로 GET /runs/{run_id}/를 폴링함
+    
+    Response 202:
+        {"run_id": "a1b2c3...", "task_id": "...", "status": "accepted"}
+    Response 400: {"error": "message 필드가 필요합니다."}
+    """
+    
+    # 1. 요청에서 message 꺼내기
+    message = request.data.get("message", "").strip()
+    if not message:
+        return Response(
+            {"error": "message 필드가 필요합니다."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    # 2. run_id 발급 + 태스크 접수
+    run_id = uuid.uuid4().hex[:12]
+    async_result = run_orchestrator.delay(run_id, message)
+
+    # 3. run_id -> task_id 매핑을 캐시에 저장
+    # trace는 run_id 기준, Celery 결과는 task_id 기준으로 저장됨
+    cache.set(f"run:{run_id}", {"task_id": async_result.id}, timeout=60 * 60)
+
+    # 4. 202 Accepted 반환
+    return Response(
+        {"run_id": run_id, "task_id": async_result.id, "status": "accepted"},
+        status=status.HTTP_202_ACCEPTED,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def run_detail(request, run_id):
+    """
+    실행 상태 폴링 엔드포인트
+    
+    프론트가 1~2초 간격으로 호출해서
+    - events(trace 녹화본)로 진행 화면을 갱신하고
+    - status가 completed가 되면 answer를 표시함
+    
+    Response 200:
+        {
+            "run_id": "...",
+            "status": "running" | "completed" | "failed",
+            "events": [{"t":.., "kind":.., "actor":.., "action":.., "detail":..}, ...],
+            "answer": "최종 답변" (completed일 때만, 그 외 null)
+        }
+    Response 404: {"error": "run_id를 찾을 수 없습니다..."}
+    """
+
+    # 1. run_id -> task_id 매핑 조회
+    mapping = cache.get(f"run:{run_id}")
+    if not mapping:
+        return Response(
+            {"error": "run_id를 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    
+    # 2. 진행 이벤트(trace 녹화본) 조회
+    events = get_events(run_id)
+
+    # 3. Celery 결과 백엔드에서 상태 판정
+    async_result = AsyncResult(mapping["task_id"])
+
+    if async_result.state == "SUCCESS":
+        run_status = "completed"
+        answer = async_result.result.get("answer")
+    elif async_result.state == "FAILURE":
+        run_status = "failed"
+        asnwer = None
+    else:
+        run_status = "running"
+        answer = None
+
+    return Response({
+        "run_id": run_id,
+        "status": run_status,
+        "events": events,
+        "answer": answer,
     })
