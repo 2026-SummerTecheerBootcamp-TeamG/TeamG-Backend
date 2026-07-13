@@ -6,11 +6,13 @@ agents 앱의 Celery 태스크 모음
 """
 
 import time
+import asyncio
 
 # shared_task: config/celery.py의 app 객체를 직접 import하지 않고도 태스크를 등록하는 데코레이터
 from celery import shared_task
 
 from agents import trace
+from agents.orchestrator import run_agent_loop
 
 
 @shared_task(name="agents.trace_demo")
@@ -33,3 +35,20 @@ def trace_demo(run_id):
     trace.done(run_id, "데모 파이프라인 종료")
 
     return {"run_id": run_id, "events": 6}
+
+
+@shared_task(name="agents.run_orchestrator")
+def run_orchestrator(run_id, user_message):
+    """
+    오케스트레이터를 워커에서 실행하는 태스크
+    
+    왜 필요한가
+        run_agent_loop는 20초 이상 걸릴 수 있는 작업
+        웹 요청 처리 중에 직접 부르면 사용자가 빈 화면을 20초 보게 되므로 API는 이 태스크를 큐에 넣고 runId만 즉시 돌려줌
+        진행 상황은 trace 방송으로, 최종 결과는 이 태스크의 반환값으로 조회
+
+    반환값은 결과 백엔드(Redis DB 0)에 JSON으로 저장
+    """
+
+    answer = asyncio.run(run_agent_loop(run_id, user_message))
+    return {"run_id": run_id, "answer": answer}
