@@ -34,5 +34,5 @@ typing-inspection==0.4.2
 typing_extensions==4.16.0
 uritemplate==4.2.0
 mcp==1.28.1
-celery=5.5.3
-redis=5.2.1
+celery==5.5.3
+redis==5.2.1
