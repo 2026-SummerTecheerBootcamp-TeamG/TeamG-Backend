@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework import status, serializers
 from drf_spectacular.utils import extend_schema
 from django.core.cache import cache
+from trips.services import create_request_and_plan
 
 from agents.parser import parse_intent, validate_slots
 
@@ -494,19 +495,26 @@ def run_create(request):
                 {"error": "여행 날짜가 없습니다. 날짜를 포함해 다시 요청해 주세요. (예: 8월 1일부터 3일까지)"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        trip_request, plan = create_request_and_plan(
+            request.user, fields, cached.get("parsed")
+        )
         nationality = getattr(request.user, "nationality", None)
-        async_result = run_full_pipeline.delay(run_id, fields, nationality)
+        async_result = run_full_pipeline.delay(run_id, fields, nationality, plan.id)
     else:
         # 자연어 직접 입력
         async_result = run_orchestrator.delay(run_id, message)
 
     # 3. run_id -> task_id 매핑을 캐시에 저장
     # trace는 run_id 기준, Celery 결과는 task_id 기준으로 저장됨
-    cache.set(f"run:{run_id}", {"task_id": async_result.id}, timeout=60 * 60)
+    cache.set(f"run:{run_id}", {
+        "task_id": async_result.id,
+        "plan_id": plan.id if parse_id else None,
+    }, timeout=60 * 60)
 
     # 4. 202 Accepted 반환
     return Response(
-        {"run_id": run_id, "task_id": async_result.id, "status": "accepted"},
+        {"run_id": run_id, "task_id": async_result.id, 
+         "plan_id": plan.id if parse_id else None, "status": "accepted"},
         status=status.HTTP_202_ACCEPTED,
     )
 
