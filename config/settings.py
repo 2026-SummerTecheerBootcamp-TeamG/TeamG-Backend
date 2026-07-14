@@ -25,12 +25,17 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-2fjx+r)+jhz#=sg+%8trm0$63*@z1md(odb5d2y&+mgyt)tl6u'
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    'i==nh(u$3$%&x90#elfp#mne72+o_@#sb-=(&%vf5-v6w0jmc$'
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get(
+    "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1"
+).split(",")
 
 
 # Application definition
@@ -43,6 +48,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     # 서드파티
+    'corsheaders',      # CORS - 다른 도메인(Vercel)의 브라우저 요청 허용
     'rest_framework',  # Django REST Framework — API 구현에 사용
     'drf_spectacular',
     'users',    # User 모델
@@ -51,6 +57,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',    # CORS 헤더는 가장 먼저 처리돼야 함
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -90,8 +97,8 @@ DATABASES = {
         'NAME': os.environ.get('POSTGRES_DB'),
         'USER': os.environ.get('POSTGRES_USER'),
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD'),
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),   # 운영 = RDS 엔드포인트
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 
@@ -183,3 +190,8 @@ CELERY_ACCEPT_CONTENT = ["json"]
 
 # 결과를 Redis에 1시간만 보관 후 자동 삭제
 CELERY_RESULT_EXPIRES = 60 * 60
+
+# CORS: 프론트엔드가 브라우저에서 이 API를 호출할 수 있게 허용
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    "CORS_ALLOWED_ORIGINS", "http://localhost:5173"
+).split(",")
