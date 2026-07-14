@@ -228,3 +228,58 @@ def plan_edit(request, plan_id):
         "task_id": async_result.id,
         "status": "accepted",
     }, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def plan_rollback(request, plan_id):
+    """
+    롤백: 이 plan_id의 버전을 복사해 '새 최신 버전(draft)'으로 만듦
+    LLM/외부 API 호출이 없어 즉시 응답
+    
+    Response 200: {"new_plan_id":.., "copied_from":.., "status": "draft"}
+    Response 404: 없거나 남의 플랜
+    """
+
+    src_plan = _get_my_plan(request, plan_id)
+    if src_plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+        
+    if src_plan.status == Plan.Status.PROCESSING:
+        return Response({"error": "생성 중인 플랜은 롤백 대상이 될 수 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    
+    from trips.services import copy_plan_version
+    new_plan = copy_plan_version(
+        src_plan, edit_request_note=f"플랜 #{src_plan.id} 버전으로 롤백"
+    )
+
+    return Response({
+        "new_plan_id": new_plan.id,
+        "copied_from": src_plan.id,
+        "status": new_plan.status,
+    })
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def trip_delete(request, request_id):
+    """
+    여행 요청 삭제 - 하위 목적지/플랜(전 버전)/일정이 FK CASCADE로 함께 삭제
+    
+    하드 삭제(복구 불가)
+    Response 204: 삭제 완료
+    Response 404: 없거나 남의 요청
+    """
+
+    try:
+        trip_request = TripRequest.objects.get(id=request_id, user=request.user)
+    except TripRequest.DoesNotExist:
+        return Response({"error": "여행 요청을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+    
+    trip_request.delete()   # DASCADE: destinations, plans, flights, hotels, days, items
+
+    # 204 No Content = "성공했고 돌려줄 내용이 없음"
+    return Response(status=status.HTTP_204_NO_CONTENT)
