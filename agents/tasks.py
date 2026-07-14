@@ -157,3 +157,45 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
 
     trace.done(run_id, "풀 파이프라인 완료")
     return result
+
+
+@shared_task(name="agents.run_local_edit")
+def run_local_edit(run_id, plan_id, edit_request):
+    """
+    국소 수정 태스크: 기존 플랜 로드 -> LLM 편집(이름만) -> 새 버전 재조립 저장
+    LLM 호출이 수 초 걸리므로 생성 파이프라인과 동일하게 비동기 패턴
+    """
+
+    from trips.models import Plan
+    from trips.services import load_day_plan, create_edited_version
+    from agents.plan_editor import edit_day_plan
+
+    old_plan = Plan.objects.get(id=plan_id)
+    day_plan = load_day_plan(old_plan)
+
+    edited = edit_day_plan(run_id, day_plan, edit_request)
+
+    new_plan, dropped = create_edited_version(old_plan, edited, edit_request)
+
+    from trips.services import load_day_plan
+    from agents.itinerary_narrate import narrate_day_plan
+
+    trace.publish(run_id, "llm", "claude", "수정본 설명문 재생성")
+    new_day_plan = load_day_plan(new_plan)
+    cities = ", ".join(d.city_name for d in new_plan.request.destinations.all())
+    new_plan.narrative = narrate_day_plan(
+        cities, new_plan.request.themes or [], new_day_plan
+    )
+    new_plan.save()
+    trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
+                  f"plan {plan_id} -> {new_plan.id}"
+                  + (f" · 제외된 미확인 장소 {len(dropped)}건" if dropped else ""))
+    trace.done(run_id, "국소 수정 완료")
+
+    return {
+        "run_id": run_id,
+        "old_plan_id": plan_id,
+        "new_plan_id": new_plan.id,
+        "summary": edited.get("summary", ""),
+        "dropped_names": dropped,
+    }
