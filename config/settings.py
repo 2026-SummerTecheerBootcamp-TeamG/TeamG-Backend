@@ -27,7 +27,7 @@ load_dotenv(BASE_DIR / ".env")
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
-    'i==nh(u$3$%&x90#elfp#mne72+o_@#sb-=(&%vf5-v6w0jmc$'
+    'django-insecure-2fjx+r)+jhz#=sg+%8trm0$63*@z1md(odb5d2y&+mgyt)tl6u',
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -137,6 +137,9 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# collectstatic이 정적 파일을 모아둘 곳 - 운영에서 nginx가 이 폴더를 서빙
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
