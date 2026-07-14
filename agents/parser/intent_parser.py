@@ -95,7 +95,9 @@ SYSTEM_PROMPT = """
 - "3박4일"은 destinations[0].nights=3으로 변환
 - 목적지가 명확하게 있으면 반드시 destinations 배열에 넣어. 절대 비워두지 마.
 - "후쿠오카"는 {"city": "후쿠오카", "city_en": "Fukuoka", "country_code": "JP", "iata": "FUK"}
-- "도쿄"는 {"city": "도쿄", "city_en": "Tokyo", "country_code": "JP", "iata": "TYO"}
+- "도쿄"는 {"city": "도쿄", "city_en": "Tokyo", "country_code": "JP", "iata": "NRT"}
+- iata에는 반드시 "실제 공항" 코드를 쓴다. 도시 통합 코드(TYO, OSA, SEL 등)는
+  항공 검색이 거부하므로 금지 — 도쿄=NRT, 오사카=KIX, 서울=ICN처럼 대표 공항으로.
 - "오사카"는 {"city": "오사카", "city_en": "Osaka", "country_code": "JP", "iata": "KIX"}
 - "방콕"은 {"city": "방콕", "city_en": "Bangkok", "country_code": "TH", "iata": "BKK"}
 """
