@@ -17,7 +17,7 @@ from django.db import transaction
 
 from trips.models import (
     TripRequest, TripDestination, Plan,
-    Flight, Hotel, ItineraryDay, ItineraryItem,
+    Flight, Hotel, ItineraryDay, ItineraryItem, Booking,
 )
 
 
@@ -69,7 +69,7 @@ def create_request_and_plan(user, fields, raw_parsed=None):
                 city_en=d.get("city_en"),
                 country_code=d.get("country_code"),
                 iata_code=d.get("iata"),
-                nights=d.get("night") or total_nights,
+                nights=d.get("nights") or total_nights,
             )
 
         plan = Plan.objects.create(request=trip_request)    # status = processing
@@ -372,3 +372,23 @@ def update_request_fields(trip_request, fields, raw_parsed=None):
             )
 
     return trip_request
+
+
+def save_booking(plan, guest_first, guest_last, guest_email, booking_data):
+    """
+    예약 시도 결과를 기록한다 (성공/실패 모두 — 실패도 이력이다).
+
+    booking_data: 오케스트레이터가 booking_confirm 툴 응답에서 수집한 dict
+                  (None이면 Claude가 예약 확정까지 도달하지 못한 것)
+    """
+    data = booking_data or {}
+    confirmed = bool(data.get("booking_id"))
+    return Booking.objects.create(
+        plan=plan,
+        status=Booking.Status.CONFIRMED if confirmed else Booking.Status.FAILED,
+        booking_id=data.get("booking_id"),
+        confirmation=data.get("confirmation"),
+        guest_name=f"{guest_first} {guest_last}".strip(),
+        guest_email=guest_email,
+        detail=data or None,
+    )
