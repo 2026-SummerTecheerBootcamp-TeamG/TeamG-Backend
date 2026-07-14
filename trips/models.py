@@ -268,4 +268,34 @@ class ItineraryItem(models.Model):
 
     def __str__(self):
         return f"{self.visit_order}. {self.place_name}"
+
+
+class Booking(models.Model):
+    """숙소 예약 기록 (샌드박스)
+
+    ERD 다이어트 때 P2로 미뤄뒀던 예약 테이블의 실체화 —
+    "재추가는 싼 마이그레이션"으로 분류해 둔 바로 그 케이스.
+    FK(1:N)인 이유: 예약 실패 후 재시도 이력도 남기기 위해.
+    """
+
+    class Status(models.TextChoices):
+        CONFIRMED = "confirmed", "확정"
+        FAILED = "failed", "실패"
+
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.CASCADE,
+        related_name="bookings",
+    )
+    status = models.CharField(max_length=12, choices=Status.choices)
+    booking_id = models.CharField(max_length=100, null=True, blank=True)     # LiteAPI 예약 번호
+    confirmation = models.CharField(max_length=100, null=True, blank=True)   # 호텔 확인 코드
+    guest_name = models.CharField(max_length=100)
+    guest_email = models.EmailField()
+    detail = models.JSONField(null=True, blank=True)    # 응답 스냅샷 (요금/상태 등)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"예약 {self.booking_id or '(실패)'} - 플랜#{self.plan_id}"
     

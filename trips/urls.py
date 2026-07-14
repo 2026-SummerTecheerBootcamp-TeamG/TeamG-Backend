@@ -17,6 +17,9 @@ urlpatterns = [
     # POST /api/v1/trips/plans/{plan_id}/rollback/  과거 버전을 새 버전으로 복사
     path("plans/<int:plan_id>/rollback", views.plan_rollback, name="plan-rollback"),
 
+    # POST /api/v1/trips/plans/{plan_id}/book/      숙소 예약 접수 (샌드박스, 에이전트 수행)
+    path("plans/<int:plan_id>/book/", views.plan_book, name="plan-book"),
+
     # DELETE /api/v1/trips/{request_id}/            여행 요청 삭제
     path("<int:request_id>", views.trip_delete, name="trip-delete"),
 

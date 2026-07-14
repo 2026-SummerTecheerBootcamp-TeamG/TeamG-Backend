@@ -173,6 +173,17 @@ def plan_detail(request, plan_id):
             }
             for day in plan.days.all()  # Meta ordering으로 일차순 보장
         ],
+        # 예약 이력 (샌드박스) — 성공/실패 재시도까지 시간순으로
+        "bookings": [
+            {
+                "status": b.status,
+                "booking_id": b.booking_id,
+                "confirmation": b.confirmation,
+                "guest_name": b.guest_name,
+                "created_at": b.created_at,
+            }
+            for b in plan.bookings.all()
+        ],
         "created_at": plan.created_at,
     })
 
@@ -347,3 +358,60 @@ def trip_delete(request, request_id):
 
     # 204 No Content = "성공했고 돌려줄 내용이 없음"
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PlanBookSerializer(serializers.Serializer):
+    """Swagger 문서용 예약 요청 바디 스키마."""
+    first_name = serializers.CharField(help_text="게스트 이름 (영문, 예: MINJAE)")
+    last_name = serializers.CharField(help_text="게스트 성 (영문, 예: HEON)")
+    email = serializers.CharField(help_text="예약 확인 메일 주소")
+
+
+@extend_schema(request=PlanBookSerializer)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def plan_book(request, plan_id):
+    """
+    숙소 예약 접수 (샌드박스) — 에이전트가 MCP 예약 도구로 예약을 수행한다.
+
+    확정(confirmed)된 플랜만 예약 가능 — 상태 수명주기의 마지막 단계:
+    processing → draft → confirmed → (예약)
+
+    Response 202: {"run_id", "task_id"} → GET /agents/runs/{run_id}/ 폴링,
+                  result에 booking_status/booking_id/confirmation
+    Response 400/404
+    """
+    plan = _get_my_plan(request, plan_id)
+    if plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if plan.status != Plan.Status.CONFIRMED:
+        return Response(
+            {"error": f"확정된 플랜만 예약할 수 있습니다 (현재: {plan.status}). "
+                      "먼저 confirm을 호출하세요."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if getattr(plan, "hotel", None) is None:
+        return Response({"error": "이 플랜에는 선택된 숙소가 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    first_name = request.data.get("first_name", "").strip()
+    last_name = request.data.get("last_name", "").strip()
+    email = request.data.get("email", "").strip()
+    if not first_name or not last_name or not email:
+        return Response({"error": "first_name, last_name, email이 모두 필요합니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    from agents.tasks import run_booking
+    run_id = uuid.uuid4().hex[:12]
+    async_result = run_booking.delay(run_id, plan.id, first_name, last_name, email)
+    cache.set(f"run:{run_id}", {"task_id": async_result.id, "plan_id": plan.id},
+              timeout=60 * 60)
+
+    return Response({
+        "run_id": run_id,
+        "task_id": async_result.id,
+        "status": "accepted",
+    }, status=status.HTTP_202_ACCEPTED)
