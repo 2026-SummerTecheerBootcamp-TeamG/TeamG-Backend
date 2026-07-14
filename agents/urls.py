@@ -29,4 +29,10 @@ urlpatterns = [
     # GET /api/v1/agents/runs/{run_id}/
     # 실행 상태/진행 이벤트/결과 폴링 조회
     path("runs/<str:run_id>/", views.run_detail, name="run-detail"),
+
+    # GET /api/v1/agents/runs/{run_id}/stream/
+    # SSE 실시간 스트림 (폴링의 push 버전)
+    path("runs/<str:run_id>/stream/", views.run_stream, name="run-stream"),
+
+    
 ]
