@@ -499,6 +499,14 @@ def run_create(request):
                 {"error": "여행 날짜가 없습니다. 날짜를 포함해 다시 요청해 주세요. (예: 8월 1일부터 3일까지)"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # 과거 날짜 차단 — 파서가 연도를 과거로 찍으면 항공 검색이 400으로
+        # 전멸한다 (실사고). ISO 형식(YYYY-MM-DD)은 문자열 비교 = 날짜 비교.
+        from datetime import date as _date
+        if dates["start"] < _date.today().isoformat():
+            return Response(
+                {"error": f"출발일({dates['start']})이 과거입니다. 미래 날짜로 다시 요청해 주세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         trip_request, plan = create_request_and_plan(
             request.user, fields, cached.get("parsed")
         )
