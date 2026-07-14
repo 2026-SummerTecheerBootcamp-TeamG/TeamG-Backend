@@ -40,6 +40,7 @@
 import json
 import re
 import uuid
+from datetime import date
 
 from agents.claude_client import ask_claude
 from .exceptions import ClaudeResponseError, NotTravelRelatedError
@@ -98,6 +99,26 @@ SYSTEM_PROMPT = """
 - "오사카"는 {"city": "오사카", "city_en": "Osaka", "country_code": "JP", "iata": "KIX"}
 - "방콕"은 {"city": "방콕", "city_en": "Bangkok", "country_code": "TH", "iata": "BKK"}
 """
+
+def _system_prompt_with_today():
+    """
+    SYSTEM_PROMPT에 '오늘 날짜' 기준 규칙을 덧붙여 반환한다.
+
+    [왜 필요한가 — 실사고 기반]
+        Claude는 오늘이 언제인지 모른다. 기준 없이 "9월 5일"을 파싱하면
+        과거 연도(2025-09-05)로 찍힐 수 있고, 과거 날짜는 항공 검색 API가
+        400으로 거부해 파이프라인 전체가 빈손이 된다 (재계획 테스트에서 실제 발생).
+        모듈 상수가 아니라 함수인 이유: 서버가 며칠씩 떠 있어도
+        호출 시점의 '오늘'이 반영되도록.
+    """
+    today = date.today().isoformat()
+    return SYSTEM_PROMPT + f"""
+- 오늘 날짜는 {today}이다.
+- 연도가 생략된 날짜는 오늘 이후의 가장 가까운 미래로 해석한다
+  (예: 오늘이 2026-07-15면 "9월 5일" → 2026-09-05, "5월 3일" → 2027-05-03).
+- 과거 날짜는 절대 출력하지 않는다.
+"""
+
 
 # Claude 호출 실패(JSON 파싱 실패) 시 최대 재시도 횟수 (총 시도 = 1 + 이 값)
 MAX_RETRIES = 2
@@ -206,7 +227,7 @@ def _call_claude_and_parse(user_input: str) -> dict:
         try:
             raw_response = ask_claude(
                 prompt=prompt,
-                system=SYSTEM_PROMPT,
+                system=_system_prompt_with_today(),
                 max_tokens=1024,  # 파싱 결과는 짧으니까 1024면 충분
             )
             return _extract_json(raw_response)
