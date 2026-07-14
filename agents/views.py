@@ -235,6 +235,8 @@ def parse_answer(request):
         })
 
     return Response(parsed)
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def parse_detail(request, parse_id):
