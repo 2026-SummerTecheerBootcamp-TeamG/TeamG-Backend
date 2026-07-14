@@ -6,19 +6,19 @@ urlpatterns = [
     path("", views.trip_list, name="trip-list"),
 
     # GET /api/v1/trips/plans/{plan_id}/            플랜 상세
-    path("plans/<int:plan_id>/", views.plan_detail, name="plan-detail"),
+    path("plans/<int:plan_id>", views.plan_detail, name="plan-detail"),
 
     # POST /api/v1/trips/plans/{plan_id}/confirm/   플랜 확정
-    path("plans/<int:plan_id>/confirm/", views.plan_confirm, name="plan-confirm"),
+    path("plans/<int:plan_id>/confirm", views.plan_confirm, name="plan-confirm"),
 
     # POST /api/v1/trips/plans/{plan_id}/edits/     대화형 수정 접수
-    path("plans/<int:plan_id>/edits/", views.plan_edit, name="plan-edit"),
+    path("plans/<int:plan_id>/edits", views.plan_edit, name="plan-edit"),
 
     # POST /api/v1/trips/plans/{plan_id}/rollback/  과거 버전을 새 버전으로 복사
-    path("plans/<int:plan_id>/rollback/", views.plan_rollback, name="plan-rollback"),
+    path("plans/<int:plan_id>/rollback", views.plan_rollback, name="plan-rollback"),
 
     # DELETE /api/v1/trips/{request_id}/            여행 요청 삭제
-    path("<int:request_id>/", views.trip_delete, name="trip-delete"),
+    path("<int:request_id>", views.trip_delete, name="trip-delete"),
 
 
 ]
