@@ -17,7 +17,7 @@ class UserManager(BaseUserManager):
         return self.create_user(email, password, nickname, **extra)
 
 class User(AbstractBaseUser, PermissionsMixin):
-    email = models.EmailField(unique=True)         
+    email = models.EmailField(unique=True)
     nickname = models.CharField(max_length=30)
     nationality = models.CharField(max_length=2, blank=True, default="")  # 국가코드 2자리
     default_departure = models.JSONField(null=True, blank=True) 
