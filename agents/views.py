@@ -17,18 +17,20 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, serializers
 from drf_spectacular.utils import extend_schema
+from django.http import StreamingHttpResponse
 from django.core.cache import cache
 from trips.services import create_request_and_plan
 
-from agents.parser import parse_intent, validate_slots
-
 import uuid
+import json
+import time
 
 # AsyncResult: task_id로 Celery 결과 백엔드에서 상태/결과를 조회하는 클래스
 from celery.result import AsyncResult
 
 from agents.tasks import run_orchestrator, run_full_pipeline
-from agents.trace import get_events
+from agents.trace import get_events, open_subscription
+from agents.parser import parse_intent, validate_slots
 
 
 class ParseRequestSerializer(serializers.Serializer):
@@ -569,3 +571,88 @@ def run_detail(request, run_id):
         "events": events,
         "result": result_payload,
     })
+
+
+def _sse_format(event):
+    """
+    이벤트 1건을 SSE 전송 형식으로 포장
+    SSE는 단순한 텍스트 규약:
+        id: <이벤트 식별자>
+        data: <내용 한 줄>
+        (빈 줄 = 이벤트 끝)
+    id에 trace 타임스탬프(t)를 쓰는 게 이어받기의 핵심
+    브라우저가 재접속할 때 마지막으로 받은 id를 자동으로 보내주기 때문
+    """
+
+    return f"id: {event['t']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _sse_generator(run_id, last_t):
+    """
+    SSE 본체
+    순서가 유실/중복 방지의 핵심
+        - 방송 구독을 먼저 킴
+        - 녹화본 재생
+        - 실시간 방송으로 전환
+    재생과 방송이 겹치는 구간은 타임스탬프 비고로 걸러냄
+    """
+    yielded_t = last_t      # 마지막으로 보낸 이벤트의 t
+    pubsub = open_subscription(run_id)  # 방송 먼저
+    try:
+        # 녹화 재생 - 이어받기 지점 이후 것만
+        for event in get_events(run_id):
+            if event["t"] <= yielded_t:
+                continue
+            yielded_t = event["t"]
+            yield _sse_format(event)
+            if event["kind"] == "done":
+                return      # 이미 끝난 실행
+        
+        # 실시간 방송 (최대 5분 안전장치)
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            # get_message(timeout=1.0): 1초까지 기다렸다가 없으면 None
+            # listen()과 달리 주기적으로 깨어나므로 keep-alive와 시간제한이 가능
+            message = pubsub.get_message(timeout=1.0)
+            if message is None:
+                # ":"로 시작하는 줄 = SSE 주석
+                # 브라우저는 무시하지만 중간 장비들이 연결이 살아있다고 인식하게 해줌
+                yield ": keep-alive\n\n"
+                continue
+            event = json.loads(message["data"])
+            if event["t"] <= yielded_t:     # 재생 구간과 겹친 방송 제거
+                continue
+            yielded_t = event["t"]
+            yield _sse_format(event)
+            if event["kind"] == "done":
+                return
+    finally:
+        pubsub.close()      # 어떤 경로로 끝나든 구독 정리
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def run_stream(request, run_id):
+    """
+    SSE 스트림: 폴링 대신 서버가 이벤트를 실시간으로 밀어줌
+    프론트는 이걸 구독해서 진행 화면을 갱신하고, kind=done에서 결과 조회로 전환
+    
+    재접속 이어받기: 브라우저/클라이언트가 Last-Event-ID 헤더로 마지막 수신 id(=t)를 보내면 그 이후 이벤트부터 재생됨
+    """
+
+    mapping = cache.get(f"run:{run_id}")
+    if not mapping:
+        return Response({"error": "run_id를 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+    
+    # 재접속이면 Last-Event-ID가 옴
+    last_t = float(request.headers.get("Last-Event-ID", 0) or 0)
+
+    response = StreamingHttpResponse(
+        _sse_generator(run_id, last_t),
+        content_type="text/event-stream",
+    )
+    response["Cache-Control"] = "no-cache"  # 중간 캐시가 스트림에 붙잡지 않게
+    response["X-Accel-Buffering"] = "no"    # Nginx가 버퍼링하지 않게
+    return response
+
