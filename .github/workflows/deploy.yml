@@ -1,0 +1,29 @@
+# main 브랜치에 push(= develop→main PR merge)되면 EC2에 자동 배포
+# 동작: GitHub의 임시 컴퓨터가 우리 EC2에 SSH로 접속해서
+#       "코드 갱신 → 컨테이너 재빌드 → migrate"를 대신 쳐준다
+#       (Phase D에서 손으로 했던 그 명령들 그대로)
+
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]        # main에 커밋이 도착하는 순간 발동
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest  # GitHub이 빌려주는 임시 리눅스 (우리 EC2 아님)
+    steps:
+      - name: SSH로 EC2 접속해 배포 명령 실행
+        uses: appleboy/ssh-action@v1     # SSH 접속을 대신해주는 공개 액션
+        with:
+          host: ${{ secrets.EC2_HOST }}          # 탄력적 IP (Secrets에서 읽음)
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}        # pem 파일 내용 (Secrets에서 읽음)
+          script: |
+            cd ~/TeamG-Backend
+            git fetch origin
+            git checkout main              # EC2 클론이 develop에 있을 수 있으므로 명시
+            git pull origin main
+            docker compose -f docker-compose.prod.yml up -d --build
+            docker compose -f docker-compose.prod.yml exec -T web python manage.py migrate --noinput
+            docker compose -f docker-compose.prod.yml exec -T web python manage.py collectstatic --noinput
