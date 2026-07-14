@@ -263,3 +263,59 @@ def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
     return run_full_pipeline(
         run_id, fields, profile["nationality"], new_plan_id
     )
+
+
+@shared_task(name="agents.run_booking")
+def run_booking(run_id, plan_id, first_name, last_name, email):
+    """
+    숙소 예약 태스크 (샌드박스) — A방식의 확장판.
+
+    Claude에게 예약 임무와 booking 툴 3종(요금 재조회/가예약/확정)을 주면,
+    스스로 순서를 밟아 예약을 완수한다. 저장된 요금이 만료된 경우의 재조회,
+    offer 만료 시의 재시도 같은 상황 대응도 Claude의 판단에 맡긴다.
+    결제 수단은 booking_confirm 툴 내부에 격리 — LLM은 카드번호를 만질 수 없다.
+    """
+    from trips.models import Plan
+    from trips.services import save_booking
+
+    plan = Plan.objects.get(id=plan_id)
+    hotel = getattr(plan, "hotel", None)
+    if hotel is None:
+        trace.done(run_id, "예약 중단: 선택된 숙소 없음")
+        return {"run_id": run_id,
+                "error": "이 플랜에는 선택된 숙소가 없어 예약할 수 없습니다."}
+
+    tr = plan.request
+    mission = (
+        f"다음 호텔을 예약하세요 (샌드박스 — 실제 결제 없음).\n"
+        f"- 호텔 ID: {hotel.liteapi_hotel_id}\n"
+        f"- 체크인: {tr.start_date} / 체크아웃: {tr.end_date}\n"
+        f"- 성인: {tr.adult}명\n"
+        f"- 게스트: {first_name} {last_name} ({email})\n"
+        f"절차: ① 요금 조회 도구로 최신 요금 확인 (저장된 요금은 만료됨) "
+        f"② 가장 저렴한 offer로 가예약(prebook) ③ 예약 확정(book/confirm). "
+        f"제공된 도구 중 예약 계열(booking_* 또는 liteapi 공식 도구)을 사용하고, "
+        f"offer 만료 오류가 나면 ①부터 다시 시도하세요. "
+        f"결제 정보를 지어내지 마세요 — 도구가 요구하지 않으면 넘기지 않습니다. "
+        f"최종 답변에는 예약 번호와 확정 요금을 요약하세요."
+    )
+
+    collected = {}
+    summary = asyncio.run(
+        run_agent_loop(run_id, mission, collected=collected, finish_trace=False)
+    )
+
+    booking_row = save_booking(plan, first_name, last_name, email,
+                               collected.get("booking"))
+    trace.publish(run_id, "db", "postgres",
+                  f"예약 기록 저장 ({booking_row.status})",
+                  f"booking_id={booking_row.booking_id or '-'}")
+    trace.done(run_id, "예약 절차 완료")
+
+    return {
+        "run_id": run_id,
+        "booking_status": booking_row.status,
+        "booking_id": booking_row.booking_id,
+        "confirmation": booking_row.confirmation,
+        "summary": summary,
+    }
