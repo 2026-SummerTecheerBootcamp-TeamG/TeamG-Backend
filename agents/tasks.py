@@ -199,3 +199,58 @@ def run_local_edit(run_id, plan_id, edit_request):
         "summary": edited.get("summary", ""),
         "dropped_names": dropped,
     }
+
+
+@shared_task(name="agents.run_replan")
+def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
+    """
+    재계획: 조건이 바뀌는 수정 -> 재파싱 -> 요청 갱신 -> 전체 파이프라인 재실행
+    
+    핵심 재사용 두 가지:
+    - 재파싱: PoC 슬롯 게이트의 병합 방식
+    - 실행: run_full_pipeline을 .delay 없이 그냥 함수로 호출 - 이미 워커 안이므로 또 큐에 넣을 필요 없이 이 자리에서 이어서 실행하면 됨
+    """
+
+    from trips.models import Plan
+    from trips.services import update_request_fields
+    from agents.parser import parse_intent
+
+    old_plan = Plan.objects.get(id=old_plan_id)
+    tr = old_plan.request   # 갱신 대상 요청
+
+    # 1. 저장된 요청을 문장으로 복원 + 수정 요청 병합
+    dest_txt = ", ".join(d.city_name for d in tr.destinations.all())
+    base = (
+        f"{tr.departure} 출발, {dest_txt} 여행. "
+        f"{tr.start_date}부터 {tr.end_date}까지, "
+        f"성인 {tr.adult}명 어린이 {tr.kid}명, 예산 {tr.total_budget}원, "
+        f"테마: {', '.join(tr.themes or []) or '없음'}"
+    )
+    merged = f"{base}. 수정 요청: {edit_request}"
+    trace.publish(run_id, "llm", "parser", "재계획 재파싱", merged[:120])
+
+    profile = {
+        "origin_iata": tr.origin_iata or "ICN",
+        "nationality": getattr(tr.user, "nationality", "KR") or "KR",
+    }
+    parsed = parse_intent(merged, profile)
+    fields = parsed.get("fields") or {}
+
+    # 2. 날짜 필수 검증
+    dates = fields.get("dates") or {}
+    if not dates.get("start") or not dates.get("end"):
+        trace.done(run_id, "재계획 중단: 날짜 확인 불가")
+        return {
+            "run_id": run_id,
+            "error": "수정 요청을 반영하면 날짜를 확정할 수 없습니다. "
+                     "날짜를 포함해 다시 요청해 주세요.",
+        }
+    
+    # 3. 요청 갱신 -> 파이프라인 재실행
+    update_request_fields(tr, fields, parsed)
+    trace.publish(run_id, "db", "postgres", "요청 조건 갱신", f"request {tr.id}")
+
+    # .delay가 아니라 직접 호출 - 반환값도 그대로 이 태스크의 결과가 됨
+    return run_full_pipeline(
+        run_id, fields, profile["nationality"], new_plan_id
+    )

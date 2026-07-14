@@ -19,6 +19,7 @@ from trips.models import TripRequest, Plan
 from django.core.cache import cache
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema
+from urllib.parse import quote
 
 from agents.edit_router import route_edit_request
 from agents.tasks import run_local_edit
@@ -79,6 +80,40 @@ def _get_my_plan(request, plan_id):
         return None
     
 
+def _flight_booking_url(trip_request):
+    """
+    Google Flights 검색 URL 조립
+    우리 항공 데이터의 출처가 Google Flights(SerpApi)라서, 같은 조건으로 검색 URL을 만들면 사용자가 데모에서 본 그 항공편을 실제 결제 화면에서 다시 만남
+    q= 파라미터는 자연어 질의를 받아줌 (Flights from ICN to KIX on ...)
+    """
+
+    dest = trip_request.destinations.first()    # MVP: 첫 목적지 기준 왕복
+    if not dest or not dest.iata_code or not trip_request.origin_iata:
+        return None     # 공항 코드가 없으면 링크 생략 (없는 것보다 틀린 링크가 나쁨)
+    
+    query = (
+        f"Flights from {trip_request.origin_iata} to {dest.iata_code} "
+        f"on {trip_request.start_date} through {trip_request.end_date}"
+    )
+    return f"https://www.google.com/travel/flights?q={quote(query)}"
+
+
+def _hotel_booking_url(hotel, trip_request):
+    """
+    Google 호텔 검색 URL 조립
+    호텔 이름+도시로 검색하면 구글이 예약 가능한 사이트들을 모아 보여줌
+    이름이 hotel_id 그대로인 경우(정적 정보 미조회)는 링크 품질이 없으므로 생략
+    """
+
+    # 이름이 ID처럼 생겼으면(lp로 시작하는 LiteAPI ID 패턴) 검색어로 무의미
+    if not hotel.name or hotel.name == hotel.liteapi_hotel_id:
+        return None
+    
+    dest = trip_request.destinations.first()
+    city = (dest.city_en or dest.city_name) if dest else ""
+    return f"https://www.google.com/travel/search?q={quote(f'{hotel.name} {city}')}"
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def plan_detail(request, plan_id):
@@ -109,12 +144,14 @@ def plan_detail(request, plan_id):
             "airline": flight.airline,
             "price_krw": flight.price_krw,
             "utility": flight.utility,
+            "booking_url": _flight_booking_url(plan.request),
         } if flight else None,
         "hotel": {
             "liteapi_hotel_id": hotel.liteapi_hotel_id,
             "name": hotel.name,
             "price_krw": hotel.price_krw,
             "utility": hotel.utility,
+            "booking_url": _hotel_booking_url(hotel, plan.request),
         } if hotel else None,
         "days": [
             {
@@ -207,6 +244,33 @@ def plan_edit(request, plan_id):
     run_id = uuid.uuid4().hex[:12]
     routed = route_edit_request(run_id, message)    # 분류
 
+    if routed["category"] == "재계획":
+        # 새 버전 자리(processing)를 먼저 만들어 목록에 "생성 중"으로 보이게
+        from agents.tasks import run_replan
+        new_plan = Plan.objects.create(request=plan.request, edit_request=message)
+        async_result = run_replan.delay(run_id, plan.id, new_plan.id, message)
+        cache.set(f"run:{run_id}",
+                  {"task_id": async_result.id, "plan_id": new_plan.id},
+                  timeout=60 * 60)
+        return Response({
+            "category": routed["category"],
+            "reason": routed["reason"],
+            "run_id": run_id,
+            "task_id": async_result.id,
+            "plan_id": new_plan.id,
+            "status": "accepted",
+        }, status=status.HTTP_202_ACCEPTED)
+
+    if routed["category"] == "예산영향":
+        # 8b에서 실행으로 교체 예정
+        return Response({
+            "category": routed["category"],
+            "reason": routed["reason"],
+            "supported": False,
+            "message": "'예산영향' 요청은 준비 중입니다. "
+                       "일정 조정이나 조건 변경(날짜/인원/예산) 요청은 바로 처리할 수 있어요.",
+        })
+    
     if routed["category"] != "국소수정":
         # 예산영향/재계획은 분류·안내까지
         return Response({

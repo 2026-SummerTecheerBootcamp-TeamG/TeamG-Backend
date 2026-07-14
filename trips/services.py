@@ -326,3 +326,49 @@ def copy_plan_version(src_plan, edit_request_note):
 
         return new_plan
     
+
+def update_request_fields(trip_request, fields, raw_parsed=None):
+    """
+    재계획: 기존 TripRequest를 새 조건으로 갱신함
+    목적지는 갱신이 아니라 전부 지우고 다시 만듦
+    """
+
+    dates = fields.get("dates") or {}
+    origin = fields.get("origin") or {}
+    pax = fields.get("pax") or {}
+
+    start = date.fromisoformat(dates["start"])
+    end = date.fromisoformat(dates["end"])
+    total_nights = (end - start).days
+
+    # origin_iata 방어
+    origin_iata = origin.get("iata")
+    if isinstance(origin_iata, dict):
+        origin_iata = origin_iata.get("iata")
+    if not (isinstance(origin_iata, str) and len(origin_iata) == 3):
+        origin_iata = None
+
+    with transaction.atomic():
+        trip_request.departure = origin.get("city") or trip_request.departure
+        trip_request.origin_iata = origin_iata or trip_request.origin_iata
+        trip_request.start_date = dates["start"]
+        trip_request.end_date = dates["end"]
+        trip_request.total_budget = fields["budget"]
+        trip_request.adult = pax.get("adult", 1)
+        trip_request.kid = pax.get("child", 0)
+        trip_request.themes = fields.get("themes") or []
+        trip_request.raw_input = raw_parsed
+        trip_request.save()
+
+        trip_request.destinations.all().delete()    # 기존 목적지 제거 후
+        for seq, d in enumerate(fields.get("destinations") or [], start=1):
+            TripDestination.objects.create(
+                request=trip_request, seq_order=seq,
+                city_name=d.get("city") or "?",
+                city_en=d.get("city_en"),
+                country_code=d.get("country_code"),
+                iata_code=d.get("iata"),
+                nights=d.get("nights") or total_nights,
+            )
+
+    return trip_request
