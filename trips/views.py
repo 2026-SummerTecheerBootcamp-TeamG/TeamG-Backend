@@ -343,7 +343,7 @@ def trip_delete(request, request_id):
         return Response({"error": "여행 요청을 찾을 수 없습니다."},
                         status=status.HTTP_404_NOT_FOUND)
     
-    trip_request.delete()   # DASCADE: destinations, plans, flights, hotels, days, items
+    trip_request.delete()   # CASCADE: destinations, plans, flights, hotels, days, items
 
     # 204 No Content = "성공했고 돌려줄 내용이 없음"
     return Response(status=status.HTTP_204_NO_CONTENT)

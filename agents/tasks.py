@@ -236,7 +236,7 @@ def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
     parsed = parse_intent(merged, profile)
     fields = parsed.get("fields") or {}
 
-    # 2. 날짜 필수 검증
+    # 2. 날짜 필수 + 과거 날짜 검증
     dates = fields.get("dates") or {}
     if not dates.get("start") or not dates.get("end"):
         trace.done(run_id, "재계획 중단: 날짜 확인 불가")
@@ -244,6 +244,15 @@ def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
             "run_id": run_id,
             "error": "수정 요청을 반영하면 날짜를 확정할 수 없습니다. "
                      "날짜를 포함해 다시 요청해 주세요.",
+        }
+    # 과거 날짜면 검색 API가 400으로 전멸하므로 여기서 중단 (실사고:
+    # 파서가 "9월 5일"의 연도를 과거로 찍음 → 항공/숙소 모두 빈손)
+    if dates["start"] < date.today().isoformat():
+        trace.done(run_id, f"재계획 중단: 과거 날짜 ({dates['start']})")
+        return {
+            "run_id": run_id,
+            "error": f"출발일({dates['start']})이 과거로 해석됐습니다. "
+                     "연도를 포함해 다시 요청해 주세요. (예: 2026년 9월 5일부터)",
         }
     
     # 3. 요청 갱신 -> 파이프라인 재실행
