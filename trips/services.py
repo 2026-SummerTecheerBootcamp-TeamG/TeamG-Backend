@@ -30,6 +30,16 @@ def create_request_and_plan(user, fields, raw_parsed=None):
 
     dates = fields.get("dates") or {}
     origin = fields.get("origin") or {}
+    origin_iata = origin.get("iata")
+    if isinstance(origin_iata, dict):
+        origin_iata = origin_iata.get("iata")
+    if not (isinstance(origin_iata, str) and len(origin_iata) == 3):
+        origin_iata = None      # 모델이 null 허용
+
+    origin_city = origin.get("city")
+    if not origin_city and isinstance(origin.get("iata"), dict):
+        origin_city = origin["iata"].get("city")    # 같은 사고에서 도시명 구조
+
     pax = fields.get("pax") or {}
 
     # 도시별 nights가 파싱에 없을 때를 대비한 전체 박 수
@@ -40,8 +50,8 @@ def create_request_and_plan(user, fields, raw_parsed=None):
     with transaction.atomic():
         trip_request = TripRequest.objects.create(
             user=user,
-            departure=origin.get("city") or "서울",
-            origin_iata=origin.get("iata"),
+            departure=origin_city or "서울",
+            origin_iata=origin_iata,
             start_date=dates["start"],  # DateField는 "YYYY-MM-DD" 문자열을 알아서 변환
             end_date=dates["end"],
             total_budget=fields["budget"],
