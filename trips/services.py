@@ -139,3 +139,119 @@ def save_pipeline_result(plan_id, result):
                 )
             
     return plan
+
+
+def load_day_plan(plan):
+    """
+    저장된 플랜의 일정을 파이프라인 day_plan과 같은 dict 구조로 되살림
+    (편집기 입력 + 재조립 원본 두 용도)
+    """
+    
+    return [
+        {
+            "day": day.day_number,
+            "city": day.city_name,
+            "items": [
+                {
+                    "place_name": item.place_name,
+                    "lat": item.latitude,
+                    "lng": item.longitude,
+                    "place_detail": item.place_detail,
+                    "travel_min_to_next": item.travel_min_to_next,
+                    "travel_mode": item.travel_mode,
+                }
+                for item in day.items.all()
+            ],
+        }
+        for day in plan.days.all()
+    ]
+
+
+def create_edited_version(old_plan, edited, edit_request):
+    """
+    편집 결과로 새 버전을 만듦
+    
+    핵심 원칙: LLM은 이름만 골랐고, 데이터는 전부 원본 행에서 가져옴
+    - 원본에 없는 이름 -> 제외
+    - 이름 순서가 원본과 같은 날 -> 행을 통째로 복사
+    - 순서/구성이 바뀐 날 -> 이동시간은 null
+    """
+
+    original = load_day_plan(old_plan)
+
+    # 이름 -> 원본 item dict 조회표
+    item_by_name = {}
+    for d in original:
+        for item in d["items"]:
+            item_by_name[item["place_name"]] = item
+    original_names = {d["day"]: [i["place_name"] for i in d["items"]] for d in original}
+    city_by_day = {d["day"]: d.get("city") for d in original}
+
+    dropped = []
+
+    with transaction.atomic():
+        # 새 plan 버전
+        new_plan = Plan.objects.create(
+            request=old_plan.request,
+            status=Plan.Status.DRAFT,
+            allocation=old_plan.allocation,     # 국소수정 = 예산 불변이므로 복사
+            narrative=old_plan.narrative,       # 설명문 재생성은 후속
+            edit_request=edit_request,
+        )
+
+        # 선택 항공/숙소도 새 버전에 복사
+        old_flight = getattr(old_plan, "flight", None)
+        if old_flight:
+            Flight.objects.create(
+                plan=new_plan, airline=old_flight.airline,
+                price_krw=old_flight.price_krw, price_original=old_flight.price_original,
+                currency=old_flight.currency, utility=old_flight.utility,
+                utility_reasons=old_flight.utility_reasons, slices=old_flight.slices,
+            )
+        old_hotel = getattr(old_plan, "hotel", None)
+        if old_hotel:
+            Hotel.objects.create(
+                plan=new_plan, liteapi_hotel_id=old_hotel.liteapi_hotel_id,
+                name=old_hotel.name, stars=old_hotel.stars,
+                price_krw=old_hotel.price_krw, price_original=old_hotel.price_original,
+                currency=old_hotel.currency, utility=old_hotel.utility,
+                utility_reasons=old_hotel.utility_reasons,
+                latitude=old_hotel.latitude, longitude=old_hotel.longitude,
+                detail=old_hotel.detail,
+            )
+
+        # 일정 재조전
+        start_date = old_plan.request.start_date
+        for day_edit in edited.get("days") or []:
+            day_number = day_edit["day"]
+            names = day_edit.get("place_names") or []
+
+            # 원본에 실재하는 이름만 통과
+            valid_names = []
+            for name in names:
+                if name in item_by_name:
+                    valid_names.append(name)
+                else:
+                    dropped.append(name)
+
+            # 이름 순서가 원본과 완전히 같으면 = 변경 없는 날 -> 이동시간 보존
+            unchanged = valid_names == original_names.get(day_number, [])
+
+            day_row = ItineraryDay.objects.create(
+                plan=new_plan, day_number=day_number,
+                city_name=city_by_day.get(day_number),
+                date=start_date + timedelta(days=day_number - 1),
+            )
+            for order, name in enumerate(valid_names, start=1):
+                src = item_by_name[name]
+                ItineraryItem.objects.create(
+                    day=day_row, visit_order=order,
+                    place_name=src["place_name"],
+                    latitude=src["lat"], longitude=src["lng"],
+                    place_detail=src["place_detail"],
+                    # 변경된 날은 동선이 달라져 기존 이동시간이 무의미
+                    travel_min_to_next=src["travel_min_to_next"] if unchanged else None,
+                    travel_mode=src["travel_mode"] if unchanged else None,
+                )
+
+    return new_plan, dropped

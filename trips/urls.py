@@ -10,4 +10,9 @@ urlpatterns = [
 
     # POST /api/v1/trips/plans/{plan_id}/confirm/   플랜 확정
     path("plans/<int:plan_id>/confirm/", views.plan_confirm, name="plan-confirm"),
+
+    # POST /api/v1/trips/plans/{plan_id}/edits/     대화형 수정 접수
+    path("plans/<int:plan_id>/edits/", views.plan_edit, name="plan-edit"),
+
+    
 ]
