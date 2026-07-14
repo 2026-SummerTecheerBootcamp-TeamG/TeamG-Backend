@@ -1,0 +1,40 @@
+# docker-compose.yml - 개발용 인프라 3종 (PostgreSQL / Redis / RabbitMQ )
+# 실행: docker compose up -d / 중지: docker compose down
+
+services:
+
+  # -- PostgreSQL: 메인 DB (ERD 9테이블이 들어갈 곳) --
+  postgres:
+    image: postgres:16              # 버전 고정
+    container_name: teamg-postgres  # 이름
+    environment:                    # 첫 실행 때 이 값으로 DB/계정 자동 생성
+      POSTGRES_DB: ${POSTGRES_DB}   # ${...} = 같은 폴더 .env에서 읽어옴
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"                 # 내 PC 포트:컨테이너 포트. 충돌 시 왼쪽만 "5433"으로
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # 데이터 보관소 - 없으면 컨테이너 삭제
+    healthcheck:                    # 접속 가능한 상태인가를 도커가 주기적으로 확인
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s  # 간격
+      timeout: 3s   # 시간초과 기준
+      retries: 5    # 재시도 횟수
+  
+  # -- Redis: 검색 후보 캐시/파싱 세션/Celery 결과 --
+  redis:
+    image: redis:7
+    container_name: teamg-redis
+    ports:
+      - "6379:6379"
+
+  # -- RabbitMQ: Celery 작업 대기열 (메시지 브로커) --
+  rabbitmq:
+    image: rabbitmq:3-management    # -management: 웹 관리 화면 포함 버전
+    container_name: teamg-rabbitmq
+    ports:
+      - "5672:5672"     # Celery가 붙는 포트
+      - "15672:15672"   # 웹 관리 UI (localhost:15672, guest/guest)
+
+volumes:
+  pgdata:   # named volume 선언
