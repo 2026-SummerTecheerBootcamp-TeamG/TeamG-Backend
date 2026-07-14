@@ -567,5 +567,5 @@ def run_detail(request, run_id):
         "run_id": run_id,
         "status": run_status,
         "events": events,
-        "answer": result_payload,
+        "result": result_payload,
     })
