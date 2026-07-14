@@ -255,3 +255,64 @@ def create_edited_version(old_plan, edited, edit_request):
                 )
 
     return new_plan, dropped
+
+
+def copy_plan_version(src_plan, edit_request_note):
+    """
+    플랜 버전을 통째로 복사해 '새 최신 버전'을 만듦
+    
+    외 되돌리기가 아니라 복사인가
+        v3에서 v1으로 되돌아가면 v2, v3 이력이 애매해짐
+        v1을 v4로 복사하면 이력이 한 방향으로 계속 흐름
+        무엇을 언제 되돌렸는지도 기록에 남음
+    """
+    
+    with transaction.atomic():
+        new_plan = Plan.objects.create(
+            request=src_plan.request,
+            status=Plan.Status.DRAFT,       # 복사본은 다시 확정 전 상태로
+            allocation=src_plan.allocation,
+            narrative=src_plan.narrative,
+            edit_request=edit_request_note  # "v{n}으로 롤백" 기록
+        )
+
+        src_flight = getattr(src_plan, "flight", None)
+        if src_flight:
+            Flight.objects.create(
+                plan=new_plan, airline=src_flight.airline,
+                price_krw=src_flight.price_krw, price_original=src_flight.price_original,
+                currency=src_flight.currency, utility=src_flight.utility,
+                utility_reasons=src_flight.utility_reasons, slices=src_flight.slices,
+            )
+        src_hotel = getattr(src_plan, "hotel", None)
+        if src_hotel:
+            Hotel.objects.create(
+                plan=new_plan, liteapi_hotel_id=src_hotel.liteapi_hotel_id,
+                name=src_hotel.name, stars=src_hotel.stars,
+                price_krw=src_hotel.price_krw, price_original=src_hotel.price_original,
+                currency=src_hotel.currency, utility=src_hotel.utility,
+                utility_reasons=src_hotel.utility_reasons,
+                latitude=src_hotel.latitude, longitude=src_hotel.longitude,
+                detail=src_hotel.detail,
+            )
+
+        # 일정은 행 단위 그대로 복사
+        for day in src_plan.days.all():
+            day_row = ItineraryDay.objects.create(
+                plan=new_plan, day_number=day.day_number,
+                city_name=day.city_name, date=day.date,
+            )
+            for item in day.items.all():
+                ItineraryItem.objects.create(
+                    day=day_row, visit_order=item.visit_order,
+                    place_name=item.place_name,
+                    latitude=item.latitude, longitude=item.longitude,
+                    place_detail=item.place_detail,
+                    arrival_time=item.arrival_time,
+                    duration_min=item.duration_min, est_cost=item.est_cost,
+                    travel_min_to_next=item.travel_min_to_next,
+                    travel_mode=item.travel_mode,
+                )
+
+        return new_plan
+    
