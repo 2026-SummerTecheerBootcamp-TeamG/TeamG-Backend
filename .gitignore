@@ -48,3 +48,4 @@ ENV/
 # IDE
 .vscode/
 .idea/
+docker-compose.override.yml
