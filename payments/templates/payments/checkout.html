@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<!--
+  결제 테스트 페이지 (DEBUG 전용)
+
+  사용법:
+    /api/v1/payments/checkout/{plan_id}/?token={JWT access 토큰}
+  흐름:
+    [결제하기] → prepare API → 토스 결제창 → 테스트 카드 결제
+    → successUrl(이 페이지)로 복귀 → confirm API → run_id 표시
+-->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>결제 테스트 - 플랜 {{ plan_id }}</title>
+  <script src="https://js.tosspayments.com/v2/standard"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 560px; margin: 48px auto; padding: 0 16px; }
+    button { font-size: 18px; padding: 12px 28px; cursor: pointer; }
+    pre { background: #f4f4f4; padding: 12px; white-space: pre-wrap; word-break: break-all; }
+    .ok { color: #0a7d34; } .err { color: #c0392b; }
+  </style>
+</head>
+<body>
+  <h2>💳 결제 테스트 — 플랜 {{ plan_id }}</h2>
+  <div id="info">준비 중...</div>
+  <p><button id="pay" disabled>결제하기</button></p>
+  <h3>결과</h3>
+  <pre id="log"></pre>
+
+  <script>
+    const planId = {{ plan_id }};
+    const params = new URLSearchParams(location.search);
+    const token = params.get("token");
+    const log = (msg, cls) => {
+      const el = document.getElementById("log");
+      el.innerHTML += (cls ? `<span class="${cls}">${msg}</span>` : msg) + "\n";
+    };
+    const api = (path, body) => fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify(body),
+    }).then(async r => ({ ok: r.ok, data: await r.json() }));
+
+    if (!token) {
+      document.getElementById("info").textContent =
+        "⚠️ URL에 ?token=JWT액세스토큰 을 붙여서 접속하세요.";
+    }
+
+    // ── 결제창에서 돌아온 경우: 쿼리에 paymentKey가 있음 → confirm ─────
+    if (params.get("paymentKey")) {
+      log("결제창 완료 — 서버 승인(confirm) 요청 중...");
+      api("/api/v1/payments/confirm/", {
+        payment_key: params.get("paymentKey"),
+        order_id: params.get("orderId"),
+        amount: Number(params.get("amount")),
+      }).then(({ ok, data }) => {
+        if (!ok) return log("승인 실패: " + JSON.stringify(data), "err");
+        log("✅ 결제 승인 완료! " + JSON.stringify(data), "ok");
+        log("→ 예약 에이전트가 접수됐습니다. 폴링으로 확인:");
+        log(`GET /api/v1/agents/runs/${data.run_id}/`);
+      });
+      document.getElementById("info").textContent = "승인 처리 중 — 아래 결과 확인";
+    } else if (token) {
+      // ── 첫 진입: prepare로 주문 만들고 버튼 활성화 ────────────────────
+      api("/api/v1/payments/prepare/", { plan_id: planId }).then(({ ok, data }) => {
+        if (!ok) {
+          document.getElementById("info").textContent = "주문 준비 실패";
+          return log(JSON.stringify(data), "err");
+        }
+        document.getElementById("info").textContent =
+          `${data.order_name} — ${data.amount.toLocaleString()}원`;
+        const btn = document.getElementById("pay");
+        btn.disabled = false;
+        btn.onclick = async () => {
+          const toss = TossPayments(data.client_key);
+          const payment = toss.payment({ customerKey: TossPayments.ANONYMOUS });
+          // successUrl에 token을 실어 보내야 복귀 후에도 API를 부를 수 있다
+          const backHere = `${location.origin}${location.pathname}?token=${encodeURIComponent(token)}`;
+          await payment.requestPayment({
+            method: "CARD",
+            amount: { currency: "KRW", value: data.amount },
+            orderId: data.order_id,
+            orderName: data.order_name,
+            successUrl: backHere,
+            failUrl: backHere + "&fail=1",
+          });
+        };
+      });
+    }
+    if (params.get("fail")) log("결제창에서 실패/취소됨: " + params.get("message"), "err");
+  </script>
+</body>
+</html>

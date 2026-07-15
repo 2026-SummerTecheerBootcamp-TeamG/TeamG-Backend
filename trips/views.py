@@ -9,6 +9,7 @@ trips/views.py - 계획 조회/확정 API
 
 import uuid
 
+from django.db.models import ProtectedError
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -354,7 +355,14 @@ def trip_delete(request, request_id):
         return Response({"error": "여행 요청을 찾을 수 없습니다."},
                         status=status.HTTP_404_NOT_FOUND)
     
-    trip_request.delete()   # CASCADE: destinations, plans, flights, hotels, days, items
+    try:
+        trip_request.delete()   # CASCADE: destinations, plans, flights, hotels, days, items
+    except ProtectedError:
+        # 결제 기록(PROTECT FK)이 달린 여행은 강제 삭제 불가 — 돈이 얽힌 데이터 보호
+        return Response(
+            {"error": "결제 이력이 있는 여행은 삭제할 수 없습니다."},
+            status=status.HTTP_409_CONFLICT,
+        )
 
     # 204 No Content = "성공했고 돌려줄 내용이 없음"
     return Response(status=status.HTTP_204_NO_CONTENT)
@@ -396,6 +404,17 @@ def plan_book(request, plan_id):
     if getattr(plan, "hotel", None) is None:
         return Response({"error": "이 플랜에는 선택된 숙소가 없습니다."},
                         status=status.HTTP_400_BAD_REQUEST)
+
+    # 결제 관문: 결제 완료(DONE) 없이는 예약 불가 — 결제 기능이 생긴 순간부터
+    # 이 직접 예약 경로는 "무결제 우회"가 되므로 여기서 차단한다.
+    # (결제 완료 시에는 confirm이 예약을 자동 접수하므로, 이 API는 사실상
+    #  재시도/수동 예약용 보조 경로가 된다)
+    from payments.models import Payment
+    if not plan.payments.filter(status=Payment.Status.DONE).exists():
+        return Response(
+            {"error": "결제가 완료되지 않은 플랜입니다. 먼저 결제를 진행해 주세요."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     first_name = request.data.get("first_name", "").strip()
     last_name = request.data.get("last_name", "").strip()

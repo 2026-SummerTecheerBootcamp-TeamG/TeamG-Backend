@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'users',    # User 모델
     'agents',   # 에이전트
     'trips',    # 여행 도메인 모델 (요청/플랜/일정, ERD 중 User 제외 8개)
+    'payments', # 결제 (토스페이먼츠 샌드박스)
 ]
 
 MIDDLEWARE = [
