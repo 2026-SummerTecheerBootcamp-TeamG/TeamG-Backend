@@ -33,6 +33,22 @@ from agents.trace import get_events, open_subscription
 from agents.parser import parse_intent, validate_slots
 
 
+def _user_profile(user) -> dict:
+    """
+    parse_intent()에 넘길 유저 프로필.
+
+    User.default_departure는 {"city": "Seoul", "iata": "ICN"} 형태의
+    JSONField라서, origin_iata에는 iata 문자열만 뽑아 넣어야 한다.
+    (그대로 dict를 넣으면 parsed["origin"]["iata"]가 dict가 되어버려서
+    이후 "{iata}" 같은 문자열 조립에서 깨진다)
+    """
+    departure = getattr(user, "default_departure", None) or {}
+    return {
+        "origin_iata": departure.get("iata") if isinstance(departure, dict) else None,
+        "nationality": getattr(user, "nationality", "KR"),
+    }
+
+
 class ParseRequestSerializer(serializers.Serializer):
     """
     Swagger 문서용 요청 바디 스키마 정의.
@@ -87,10 +103,7 @@ def parse_request(request):
 
     # ── Step 2. 유저 프로필 기본값 가져오기 ──────────────────────────────
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     # ── Step 3. 자연어 파싱 실행 ─────────────────────────────────────────
     try:
@@ -198,10 +211,7 @@ def parse_answer(request):
     merged_message = f"{original_message} {answer}"
 
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     try:
         parsed = parse_intent(merged_message, user_profile)
@@ -235,6 +245,8 @@ def parse_answer(request):
         })
 
     return Response(parsed)
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def parse_detail(request, parse_id):
@@ -391,10 +403,7 @@ def parse_correct(request, parse_id):
     merged_message = f"{original_message} {field}은(는) {value}으로 수정"
 
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     try:
         parsed = parse_intent(merged_message, user_profile)
@@ -495,6 +504,14 @@ def run_create(request):
         if not dates.get("start") or not dates.get("end"):
             return Response(
                 {"error": "여행 날짜가 없습니다. 날짜를 포함해 다시 요청해 주세요. (예: 8월 1일부터 3일까지)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # 과거 날짜 차단 — 파서가 연도를 과거로 찍으면 항공 검색이 400으로
+        # 전멸한다 (실사고). ISO 형식(YYYY-MM-DD)은 문자열 비교 = 날짜 비교.
+        from datetime import date as _date
+        if dates["start"] < _date.today().isoformat():
+            return Response(
+                {"error": f"출발일({dates['start']})이 과거입니다. 미래 날짜로 다시 요청해 주세요."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         trip_request, plan = create_request_and_plan(

@@ -17,7 +17,7 @@ from django.db import transaction
 
 from trips.models import (
     TripRequest, TripDestination, Plan,
-    Flight, Hotel, ItineraryDay, ItineraryItem,
+    Flight, Hotel, ItineraryDay, ItineraryItem, Booking,
 )
 
 
@@ -69,7 +69,7 @@ def create_request_and_plan(user, fields, raw_parsed=None):
                 city_en=d.get("city_en"),
                 country_code=d.get("country_code"),
                 iata_code=d.get("iata"),
-                nights=d.get("night") or total_nights,
+                nights=d.get("nights") or total_nights,
             )
 
         plan = Plan.objects.create(request=trip_request)    # status = processing
@@ -117,12 +117,15 @@ def save_pipeline_result(plan_id, result):
             Hotel.objects.create(
                 plan=plan,
                 liteapi_hotel_id=hotel_id,
-                name=hotel_id,
+                name=raw.get("name") or hotel_id,
+                stars=raw.get("star_rating"),
                 price_krw=sel_hotel.get("krw") or 0,
                 price_original=sel_hotel.get("krw") or 0,
                 currency="KRW",
                 utility=sel_hotel.get("utility"),
                 utility_reasons=raw.get("reasons"),
+                latitude=raw.get("latitude"),
+                longitude=raw.get("longitude"),
                 detail=raw,
             )
 
@@ -326,3 +329,137 @@ def copy_plan_version(src_plan, edit_request_note):
 
         return new_plan
     
+
+def update_request_fields(trip_request, fields, raw_parsed=None):
+    """
+    재계획: 기존 TripRequest를 새 조건으로 갱신함
+    목적지는 갱신이 아니라 전부 지우고 다시 만듦
+    """
+
+    dates = fields.get("dates") or {}
+    origin = fields.get("origin") or {}
+    pax = fields.get("pax") or {}
+
+    start = date.fromisoformat(dates["start"])
+    end = date.fromisoformat(dates["end"])
+    total_nights = (end - start).days
+
+    # origin_iata 방어
+    origin_iata = origin.get("iata")
+    if isinstance(origin_iata, dict):
+        origin_iata = origin_iata.get("iata")
+    if not (isinstance(origin_iata, str) and len(origin_iata) == 3):
+        origin_iata = None
+
+    with transaction.atomic():
+        trip_request.departure = origin.get("city") or trip_request.departure
+        trip_request.origin_iata = origin_iata or trip_request.origin_iata
+        trip_request.start_date = dates["start"]
+        trip_request.end_date = dates["end"]
+        trip_request.total_budget = fields["budget"]
+        trip_request.adult = pax.get("adult", 1)
+        trip_request.kid = pax.get("child", 0)
+        trip_request.themes = fields.get("themes") or []
+        trip_request.raw_input = raw_parsed
+        trip_request.save()
+
+        trip_request.destinations.all().delete()    # 기존 목적지 제거 후
+        for seq, d in enumerate(fields.get("destinations") or [], start=1):
+            TripDestination.objects.create(
+                request=trip_request, seq_order=seq,
+                city_name=d.get("city") or "?",
+                city_en=d.get("city_en"),
+                country_code=d.get("country_code"),
+                iata_code=d.get("iata"),
+                nights=d.get("nights") or total_nights,
+            )
+
+    return trip_request
+
+
+def save_booking(plan, guest_first, guest_last, guest_email, booking_data):
+    """
+    예약 시도 결과를 기록한다 (성공/실패 모두 — 실패도 이력이다).
+
+    booking_data: 오케스트레이터가 booking_confirm 툴 응답에서 수집한 dict
+                  (None이면 Claude가 예약 확정까지 도달하지 못한 것)
+    """
+    data = booking_data or {}
+    confirmed = bool(data.get("booking_id"))
+    return Booking.objects.create(
+        plan=plan,
+        status=Booking.Status.CONFIRMED if confirmed else Booking.Status.FAILED,
+        booking_id=data.get("booking_id"),
+        confirmation=data.get("confirmation"),
+        guest_name=f"{guest_first} {guest_last}".strip(),
+        guest_email=guest_email,
+        detail=data or None,
+    )
+
+
+def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
+    """
+    예산영향 수정의 새 버전 완성: 배분/숙소는 새것, 항공/일정은 원본 유지.
+
+    왜 항공은 복사인가: 예산영향 수정(예: "숙소 업그레이드")에서 항공은
+    이미 확정된 선택이므로 고정 — 재배분 엔진에도 그 1개만 옵션으로 넣었다.
+    왜 일정은 복사인가: 숙소가 바뀌어도 방문지 동선은 그대로 (일정 변경은 국소수정 관할).
+    """
+    selection = allocation.get("selection") or {}
+
+    with transaction.atomic():
+        new_plan.allocation = allocation
+        # 배분 설명은 allocation과 함께 result로 반환되고, 일정 설명(narrative)은 불변
+        new_plan.narrative = old_plan.narrative
+        new_plan.status = Plan.Status.DRAFT
+        new_plan.save()
+
+        # 항공: 원본 선택 그대로 복사 (고정)
+        old_flight = getattr(old_plan, "flight", None)
+        if old_flight:
+            Flight.objects.create(
+                plan=new_plan, airline=old_flight.airline,
+                price_krw=old_flight.price_krw, price_original=old_flight.price_original,
+                currency=old_flight.currency, utility=old_flight.utility,
+                utility_reasons=old_flight.utility_reasons, slices=old_flight.slices,
+            )
+
+        # 숙소: 재배분이 고른 새 선택
+        sel_hotel = selection.get("hotel")
+        if sel_hotel:
+            raw = sel_hotel.get("raw") or {}
+            hotel_id = str(sel_hotel.get("label") or "?")
+            Hotel.objects.create(
+                plan=new_plan,
+                liteapi_hotel_id=hotel_id,
+                name=raw.get("name") or hotel_id,
+                stars=raw.get("star_rating"),
+                price_krw=sel_hotel.get("krw") or 0,
+                price_original=sel_hotel.get("krw") or 0,
+                currency="KRW",
+                utility=sel_hotel.get("utility"),
+                utility_reasons=raw.get("reasons"),
+                latitude=raw.get("latitude"),
+                longitude=raw.get("longitude"),
+                detail=raw,
+            )
+
+        # 일정: 원본 행 통째 복사 (이동시간 포함 — 내용 동일하므로 전부 유효)
+        for day in old_plan.days.all():
+            day_row = ItineraryDay.objects.create(
+                plan=new_plan, day_number=day.day_number,
+                city_name=day.city_name, date=day.date,
+            )
+            for item in day.items.all():
+                ItineraryItem.objects.create(
+                    day=day_row, visit_order=item.visit_order,
+                    place_name=item.place_name,
+                    latitude=item.latitude, longitude=item.longitude,
+                    place_detail=item.place_detail,
+                    arrival_time=item.arrival_time,
+                    duration_min=item.duration_min, est_cost=item.est_cost,
+                    travel_min_to_next=item.travel_min_to_next,
+                    travel_mode=item.travel_mode,
+                )
+
+    return new_plan

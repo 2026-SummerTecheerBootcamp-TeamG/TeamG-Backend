@@ -79,7 +79,10 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
         f"성인 {adults}명"
         + (f", 어린이 {children}명" if children else "")
         + f"이 {fields['dates']['start']}부터 {fields['dates']['end']}까지 "
-        + f"{origin.get('city', '서울')}({origin.get('iata', 'ICN')})에서 "
+        # .get(key, default)는 키가 "없을" 때만 default를 쓴다. origin이
+        # {"city": None, "iata": None}처럼 값이 채워진 채로 비어있으면 그대로
+        # None이 나와 "None(None)에서"라는 문장이 만들어지므로 or로 방어한다.
+        + f"{origin.get('city') or '서울'}({origin.get('iata') or 'ICN'})에서 "
         + f"{dest_names}(으)로 여행합니다. 테마: {', '.join(themes) or '없음'}. "
         + "왕복 항공권 후보와 호텔 후보를 검색하고 점수 평가까지 해주세요. "
         + "최종 답변은 검색 결과 요약만 간단히 작성하세요."
@@ -198,4 +201,213 @@ def run_local_edit(run_id, plan_id, edit_request):
         "new_plan_id": new_plan.id,
         "summary": edited.get("summary", ""),
         "dropped_names": dropped,
+    }
+
+
+@shared_task(name="agents.run_replan")
+def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
+    """
+    재계획: 조건이 바뀌는 수정 -> 재파싱 -> 요청 갱신 -> 전체 파이프라인 재실행
+    
+    핵심 재사용 두 가지:
+    - 재파싱: PoC 슬롯 게이트의 병합 방식
+    - 실행: run_full_pipeline을 .delay 없이 그냥 함수로 호출 - 이미 워커 안이므로 또 큐에 넣을 필요 없이 이 자리에서 이어서 실행하면 됨
+    """
+
+    from trips.models import Plan
+    from trips.services import update_request_fields
+    from agents.parser import parse_intent
+
+    old_plan = Plan.objects.get(id=old_plan_id)
+    tr = old_plan.request   # 갱신 대상 요청
+
+    # 1. 저장된 요청을 문장으로 복원 + 수정 요청 병합
+    dest_txt = ", ".join(d.city_name for d in tr.destinations.all())
+    base = (
+        f"{tr.departure} 출발, {dest_txt} 여행. "
+        f"{tr.start_date}부터 {tr.end_date}까지, "
+        f"성인 {tr.adult}명 어린이 {tr.kid}명, 예산 {tr.total_budget}원, "
+        f"테마: {', '.join(tr.themes or []) or '없음'}"
+    )
+    merged = f"{base}. 수정 요청: {edit_request}"
+    trace.publish(run_id, "llm", "parser", "재계획 재파싱", merged[:120])
+
+    profile = {
+        "origin_iata": tr.origin_iata or "ICN",
+        "nationality": getattr(tr.user, "nationality", "KR") or "KR",
+    }
+    parsed = parse_intent(merged, profile)
+    fields = parsed.get("fields") or {}
+
+    # 2. 날짜 필수 + 과거 날짜 검증
+    dates = fields.get("dates") or {}
+    if not dates.get("start") or not dates.get("end"):
+        trace.done(run_id, "재계획 중단: 날짜 확인 불가")
+        return {
+            "run_id": run_id,
+            "error": "수정 요청을 반영하면 날짜를 확정할 수 없습니다. "
+                     "날짜를 포함해 다시 요청해 주세요.",
+        }
+    # 과거 날짜면 검색 API가 400으로 전멸하므로 여기서 중단 (실사고:
+    # 파서가 "9월 5일"의 연도를 과거로 찍음 → 항공/숙소 모두 빈손)
+    if dates["start"] < date.today().isoformat():
+        trace.done(run_id, f"재계획 중단: 과거 날짜 ({dates['start']})")
+        return {
+            "run_id": run_id,
+            "error": f"출발일({dates['start']})이 과거로 해석됐습니다. "
+                     "연도를 포함해 다시 요청해 주세요. (예: 2026년 9월 5일부터)",
+        }
+    
+    # 3. 요청 갱신 -> 파이프라인 재실행
+    update_request_fields(tr, fields, parsed)
+    trace.publish(run_id, "db", "postgres", "요청 조건 갱신", f"request {tr.id}")
+
+    # .delay가 아니라 직접 호출 - 반환값도 그대로 이 태스크의 결과가 됨
+    return run_full_pipeline(
+        run_id, fields, profile["nationality"], new_plan_id
+    )
+
+
+@shared_task(name="agents.run_booking")
+def run_booking(run_id, plan_id, first_name, last_name, email):
+    """
+    숙소 예약 태스크 (샌드박스) — A방식의 확장판.
+
+    Claude에게 예약 임무와 booking 툴 3종(요금 재조회/가예약/확정)을 주면,
+    스스로 순서를 밟아 예약을 완수한다. 저장된 요금이 만료된 경우의 재조회,
+    offer 만료 시의 재시도 같은 상황 대응도 Claude의 판단에 맡긴다.
+    결제 수단은 booking_confirm 툴 내부에 격리 — LLM은 카드번호를 만질 수 없다.
+    """
+    from trips.models import Plan
+    from trips.services import save_booking
+
+    plan = Plan.objects.get(id=plan_id)
+    hotel = getattr(plan, "hotel", None)
+    if hotel is None:
+        trace.done(run_id, "예약 중단: 선택된 숙소 없음")
+        return {"run_id": run_id,
+                "error": "이 플랜에는 선택된 숙소가 없어 예약할 수 없습니다."}
+
+    tr = plan.request
+    mission = (
+        f"다음 호텔을 예약하세요 (샌드박스 — 실제 결제 없음).\n"
+        f"- 호텔 ID: {hotel.liteapi_hotel_id}\n"
+        f"- 체크인: {tr.start_date} / 체크아웃: {tr.end_date}\n"
+        f"- 성인: {tr.adult}명\n"
+        f"- 게스트: {first_name} {last_name} ({email})\n"
+        f"절차: ① 요금 조회 도구로 최신 요금 확인 (저장된 요금은 만료됨) "
+        f"② 가장 저렴한 offer로 가예약(prebook) ③ 예약 확정(book/confirm). "
+        f"제공된 도구 중 예약 계열(booking_* 또는 liteapi 공식 도구)을 사용하고, "
+        f"offer 만료 오류가 나면 ①부터 다시 시도하세요. "
+        f"결제 정보를 지어내지 마세요 — 도구가 요구하지 않으면 넘기지 않습니다. "
+        f"최종 답변에는 예약 번호와 확정 요금을 요약하세요."
+    )
+
+    collected = {}
+    summary = asyncio.run(
+        run_agent_loop(run_id, mission, collected=collected, finish_trace=False)
+    )
+
+    booking_row = save_booking(plan, first_name, last_name, email,
+                               collected.get("booking"))
+    trace.publish(run_id, "db", "postgres",
+                  f"예약 기록 저장 ({booking_row.status})",
+                  f"booking_id={booking_row.booking_id or '-'}")
+    trace.done(run_id, "예약 절차 완료")
+
+    return {
+        "run_id": run_id,
+        "booking_status": booking_row.status,
+        "booking_id": booking_row.booking_id,
+        "confirmation": booking_row.confirmation,
+        "summary": summary,
+    }
+
+
+@shared_task(name="agents.run_budget_edit")
+def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
+    """
+    예산영향 수정: 숙소만 재검색 → 기존 항공 고정 → 재배분 → 새 버전.
+
+    수정 라우터 3갈래의 마지막 조각 (국소수정/재계획은 기구현).
+    예: "숙소를 더 좋은 걸로 바꿔줘" — 항공/일정은 그대로, 숙소와 예산 배분만 다시.
+    """
+    from trips.models import Plan
+    from trips.services import save_budget_edited_version
+
+    old_plan = Plan.objects.get(id=old_plan_id)
+    new_plan = Plan.objects.get(id=new_plan_id)
+    tr = old_plan.request
+    dest = tr.destinations.first()
+
+    # ── 1. 숙소 재검색 (A방식 — 수정 요청을 선호 조건으로 전달) ─────────
+    mission = (
+        f"숙소를 다시 검색합니다. 사용자의 수정 요청: \"{edit_request}\"\n"
+        f"- 도시: {dest.city_en or dest.city_name} / 국가코드: {dest.country_code or 'JP'}\n"
+        f"- 체크인: {tr.start_date} / 체크아웃: {tr.end_date} / 성인: {tr.adult}명\n"
+        f"절차: 객실 배분 → 숙소 검색 → 후보 평가(점수)까지 수행하세요. "
+        f"항공/예약 관련 도구는 사용하지 마세요. "
+        f"수정 요청의 선호(등급/위치/분위기 등)를 평가에 반영하세요. "
+        f"최종 답변은 후보 요약만 간단히."
+    )
+    collected = {}
+    asyncio.run(run_agent_loop(run_id, mission,
+                               collected=collected, finish_trace=False))
+    hotel_options = collected.get("hotel_options", [])
+    trace.publish(run_id, "data", "orchestrator", "숙소 재검색 완료",
+                  f"후보 {len(hotel_options)}건")
+
+    if not hotel_options:
+        trace.done(run_id, "예산영향 수정 중단: 숙소 후보 없음")
+        return {"run_id": run_id,
+                "error": "조건에 맞는 숙소 후보를 찾지 못했습니다. 조건을 바꿔 다시 시도해 주세요."}
+
+    # ── 2. 재배분: 기존 선택 항공을 "고정 옵션 1개"로 투입 ──────────────
+    # 옵션이 1개면 그리디 엔진은 항공을 못 바꾸므로 자연스럽게 고정된다
+    old_flight = getattr(old_plan, "flight", None)
+    flight_options = []
+    if old_flight:
+        flight_options = [{
+            "label": old_flight.airline,
+            "krw": old_flight.price_krw,
+            "utility": float(old_flight.utility) if old_flight.utility is not None else None,
+            "raw": old_flight.slices,
+        }]
+
+    days = (tr.end_date - tr.start_date).days + 1
+    travelers = tr.adult + tr.kid
+    allocation = allocate_budget(
+        total_budget=tr.total_budget,
+        flight_options=flight_options,
+        hotel_options=hotel_options,
+        days=days,
+        travelers=travelers,
+    )
+    trace.publish(run_id, "rule", "budget", "재배분 완료",
+                  str(allocation.get("status", "")))
+
+    # ── 3. 재배분 설명 (LLM) ─────────────────────────────────────────────
+    trace.publish(run_id, "llm", "claude", "재배분 설명 생성")
+    explanation = explain_allocation(
+        {
+            "목적지": dest.city_name,
+            "수정요청": edit_request,
+            "총예산_KRW": tr.total_budget,
+        },
+        allocation,
+        language_for_nationality(getattr(tr.user, "nationality", None)),
+    )
+
+    # ── 4. 새 버전 저장 (배분/숙소 새것, 항공/일정 원본 유지) ───────────
+    save_budget_edited_version(old_plan, new_plan, allocation, explanation)
+    trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
+                  f"plan {old_plan_id} -> {new_plan.id}")
+    trace.done(run_id, "예산영향 수정 완료")
+
+    return {
+        "run_id": run_id,
+        "old_plan_id": old_plan_id,
+        "new_plan_id": new_plan.id,
+        "allocation": allocation,
+        "explanation": explanation,
     }

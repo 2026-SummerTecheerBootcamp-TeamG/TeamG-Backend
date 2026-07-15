@@ -81,6 +81,24 @@ def _collect_candidates(tool_name, result_text, collected):
             for c in data.get("scored_candidates", [])
         ]
 
+    elif tool_name == "booking_confirm":
+        # 예약 확정 결과 — 성공 응답만 수집 (DB 저장은 태스크가 담당)
+        if isinstance(data, dict) and "error" not in data:
+            collected["booking"] = data
+
+    elif tool_name == "post_bookings":
+        # LiteAPI "공식" MCP 서버의 예약 확정 툴 — 응답 구조가 우리 툴과 달라
+        # 여기서 우리 형식({"booking_id", "confirmation"})으로 맞춰 수집한다
+        inner = data.get("data") if isinstance(data, dict) else None
+        if isinstance(inner, dict) and inner.get("bookingId"):
+            collected["booking"] = {
+                "booking_id": inner.get("bookingId"),
+                "confirmation": (inner.get("hotelConfirmationCode")
+                                 or inner.get("supplierBookingId")),
+                "status": inner.get("status"),
+                "raw": inner,
+            }
+
 
 async def run_agent_loop(run_id, user_message, collected=None, finish_trace=True):
     

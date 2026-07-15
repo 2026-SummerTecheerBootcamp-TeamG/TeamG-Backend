@@ -33,9 +33,13 @@ SECRET_KEY = os.environ.get(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
 
-ALLOWED_HOSTS = os.environ.get(
-    "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1"
-).split(",")
+# 빈 항목 방어: 환경변수가 빈 값이거나 끝에 쉼표가 붙어도 죽지 않게
+# (조각 중 내용 있는 것만 남기고, 전부 비면 개발 기본값으로 복귀)
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+] or ["localhost", "127.0.0.1"]
 
 
 # Application definition
@@ -54,6 +58,8 @@ INSTALLED_APPS = [
     'users',    # User 모델
     'agents',   # 에이전트
     'trips',    # 여행 도메인 모델 (요청/플랜/일정, ERD 중 User 제외 8개)
+    'payments', # 결제 (토스페이먼츠 샌드박스)
+    'provider', # 자체 제작 액티비티 공급자 (재고/hold/reserve)
 ]
 
 MIDDLEWARE = [
@@ -195,6 +201,9 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_EXPIRES = 60 * 60
 
 # CORS: 프론트엔드가 브라우저에서 이 API를 호출할 수 있게 허용
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ALLOWED_ORIGINS", "http://localhost:5173"
-).split(",")
+# 빈 항목 방어: 빈 값/끝 쉼표에도 죽지 않게 (원리는 ALLOWED_HOSTS와 동일)
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+] or ["http://localhost:5173"]

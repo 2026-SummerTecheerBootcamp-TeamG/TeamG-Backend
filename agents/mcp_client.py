@@ -29,10 +29,39 @@ from agents import trace
 # 새 MCP 서버가 생기면 여기 한 줄 추가하면 됨
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SERVER_PATHS = {
-    "flight": os.path.join(_REPO_ROOT, "agents", "flight", "mcp_server.py"),
-    "accommodation": os.path.join(_REPO_ROOT, "agents", "accommodation", "mcp_server.py"),
-}
+
+def _server_specs():
+    """
+    서버 등록부를 "실행 명령" 단위로 만든다.
+
+    [왜 함수인가 + 왜 명령 리스트인가]
+        원래는 "파이썬 스크립트 경로"만 등록했는데, 외부 생태계의 공식 MCP
+        서버(예: LiteAPI 공식 서버 = Node.js)를 꽂으려면 임의의 실행 명령을
+        받을 수 있어야 한다. MCP가 stdio 표준이라서 명령만 다를 뿐
+        연결 방식은 완전히 동일 — 이게 MCP 상호운용성의 실증이다.
+
+    반환: {서버이름: [실행, 인자...], ...}
+    """
+    specs = {
+        "flight": [sys.executable,
+                   os.path.join(_REPO_ROOT, "agents", "flight", "mcp_server.py")],
+        "accommodation": [sys.executable,
+                          os.path.join(_REPO_ROOT, "agents", "accommodation", "mcp_server.py")],
+        "booking": [sys.executable,
+                    os.path.join(_REPO_ROOT, "agents", "booking", "mcp_server.py")],
+        # 4번째 서버 — 자체 제작 공급자 (재고 원장 = 우리 DB, hold→reserve 2단계)
+        "activity_provider": [sys.executable,
+                              os.path.join(_REPO_ROOT, "provider", "mcp_server.py")],
+    }
+
+    # LiteAPI 공식 MCP 서버 (Node.js) — 설치된 환경에서만 등록 (선택적).
+    # .env의 LITEAPI_MCP_PATH에 run-mcp-server.mjs의 절대 경로를 넣으면 활성화.
+    # 안 넣은 팀원/환경에서는 조용히 생략 — 기존 3서버로 정상 동작.
+    official = os.environ.get("LITEAPI_MCP_PATH")
+    if official and os.path.exists(official):
+        specs["liteapi_official"] = ["node", official]
+
+    return specs
 
 
 def mcp_tool_to_claude_tool(mcp_tool):
@@ -87,14 +116,18 @@ class ToolHub:
 
         self._stack = AsyncExitStack()
 
-        for server_name, server_path in SERVER_PATHS.items():
-            # 서버 실행 정보: 현재 파이썬으로 서버 실행
-            # env=dict(os.environ): MCP는 보안상 부모의 환경변수를 자식에게 자동 상속하지 않음
-            # APi 키가 든 환경변수를 명시적으로 전달함
+        # env=dict(os.environ): MCP는 보안상 부모의 환경변수를 자식에게 자동 상속하지 않음
+        # API 키가 든 환경변수를 명시적으로 전달함
+        child_env = dict(os.environ)
+        # LiteAPI 공식 서버는 키 이름이 다르다(LITEAPI_API_KEY) — 우리 키를 이름만 바꿔 전달
+        child_env.setdefault("LITEAPI_API_KEY", child_env.get("LITEAPI_KEY", ""))
+
+        for server_name, command in _server_specs().items():
+            # command = [실행파일, 인자...] — 파이썬이든 node든 stdio라 방식은 동일
             params = StdioServerParameters(
-                command=sys.executable,
-                args=[server_path],
-                env=dict(os.environ),
+                command=command[0],
+                args=command[1:],
+                env=child_env,
             )
 
             # enver_async_context = "async with ...를 열고 바구니에 등록"과 같음

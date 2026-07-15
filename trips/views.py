@@ -9,6 +9,7 @@ trips/views.py - 계획 조회/확정 API
 
 import uuid
 
+from django.db.models import ProtectedError
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -19,6 +20,7 @@ from trips.models import TripRequest, Plan
 from django.core.cache import cache
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema
+from urllib.parse import quote
 
 from agents.edit_router import route_edit_request
 from agents.tasks import run_local_edit
@@ -79,6 +81,40 @@ def _get_my_plan(request, plan_id):
         return None
     
 
+def _flight_booking_url(trip_request):
+    """
+    Google Flights 검색 URL 조립
+    우리 항공 데이터의 출처가 Google Flights(SerpApi)라서, 같은 조건으로 검색 URL을 만들면 사용자가 데모에서 본 그 항공편을 실제 결제 화면에서 다시 만남
+    q= 파라미터는 자연어 질의를 받아줌 (Flights from ICN to KIX on ...)
+    """
+
+    dest = trip_request.destinations.first()    # MVP: 첫 목적지 기준 왕복
+    if not dest or not dest.iata_code or not trip_request.origin_iata:
+        return None     # 공항 코드가 없으면 링크 생략 (없는 것보다 틀린 링크가 나쁨)
+    
+    query = (
+        f"Flights from {trip_request.origin_iata} to {dest.iata_code} "
+        f"on {trip_request.start_date} through {trip_request.end_date}"
+    )
+    return f"https://www.google.com/travel/flights?q={quote(query)}"
+
+
+def _hotel_booking_url(hotel, trip_request):
+    """
+    Google 호텔 검색 URL 조립
+    호텔 이름+도시로 검색하면 구글이 예약 가능한 사이트들을 모아 보여줌
+    이름이 hotel_id 그대로인 경우(정적 정보 미조회)는 링크 품질이 없으므로 생략
+    """
+
+    # 이름이 ID처럼 생겼으면(lp로 시작하는 LiteAPI ID 패턴) 검색어로 무의미
+    if not hotel.name or hotel.name == hotel.liteapi_hotel_id:
+        return None
+    
+    dest = trip_request.destinations.first()
+    city = (dest.city_en or dest.city_name) if dest else ""
+    return f"https://www.google.com/travel/search?q={quote(f'{hotel.name} {city}')}"
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def plan_detail(request, plan_id):
@@ -109,12 +145,22 @@ def plan_detail(request, plan_id):
             "airline": flight.airline,
             "price_krw": flight.price_krw,
             "utility": flight.utility,
+            "booking_url": _flight_booking_url(plan.request),
+            # slices는 agents/flight/flight.py의 make_candidate()가 채운 raw 값
+            "departure_time": (flight.slices or {}).get("departure_time"),
+            "arrival_time": (flight.slices or {}).get("arrival_time"),
+            "duration_min": (flight.slices or {}).get("duration_min"),
+            "stops": (flight.slices or {}).get("stops"),
         } if flight else None,
         "hotel": {
             "liteapi_hotel_id": hotel.liteapi_hotel_id,
             "name": hotel.name,
             "price_krw": hotel.price_krw,
             "utility": hotel.utility,
+            "booking_url": _hotel_booking_url(hotel, plan.request),
+            "stars": hotel.stars,
+            "latitude": hotel.latitude,
+            "longitude": hotel.longitude,
         } if hotel else None,
         "days": [
             {
@@ -135,6 +181,17 @@ def plan_detail(request, plan_id):
                 ],
             }
             for day in plan.days.all()  # Meta ordering으로 일차순 보장
+        ],
+        # 예약 이력 (샌드박스) — 성공/실패 재시도까지 시간순으로
+        "bookings": [
+            {
+                "status": b.status,
+                "booking_id": b.booking_id,
+                "confirmation": b.confirmation,
+                "guest_name": b.guest_name,
+                "created_at": b.created_at,
+            }
+            for b in plan.bookings.all()
         ],
         "created_at": plan.created_at,
     })
@@ -207,14 +264,57 @@ def plan_edit(request, plan_id):
     run_id = uuid.uuid4().hex[:12]
     routed = route_edit_request(run_id, message)    # 분류
 
-    if routed["category"] != "국소수정":
-        # 예산영향/재계획은 분류·안내까지
+    if routed["category"] == "재계획":
+        # 새 버전 자리(processing)를 먼저 만들어 목록에 "생성 중"으로 보이게
+        from agents.tasks import run_replan
+        new_plan = Plan.objects.create(request=plan.request, edit_request=message)
+        async_result = run_replan.delay(run_id, plan.id, new_plan.id, message)
+        cache.set(f"run:{run_id}",
+                  {"task_id": async_result.id, "plan_id": new_plan.id},
+                  timeout=60 * 60)
         return Response({
-            "caategory": routed["category"],
+            "category": routed["category"],
+            "reason": routed["reason"],
+            "run_id": run_id,
+            "task_id": async_result.id,
+            "plan_id": new_plan.id,
+            "status": "accepted",
+        }, status=status.HTTP_202_ACCEPTED)
+
+    if routed["category"] == "예산영향":
+        # 숙소 재검색 + 재배분 (항공/일정 고정) — 라우터 3갈래의 마지막 실행
+        # 이 편집은 "기존 항공을 고정한 채" 숙소만 다시 고르는 방식이라,
+        # 원본 플랜에 애초에 선택된 항공이 없으면(예산 부족으로 무선택이었던 경우)
+        # 고정할 대상이 없어 재배분이 무조건 no_flights로 끝난다. 그 전에 막는다.
+        if getattr(plan, "flight", None) is None:
+            return Response(
+                {"error": "이 플랜은 선택된 항공이 없어 예산영향 수정을 진행할 수 없습니다. "
+                          "예산을 늘리거나 조건을 바꿔 처음부터 다시 만들어 주세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from agents.tasks import run_budget_edit
+        new_plan = Plan.objects.create(request=plan.request, edit_request=message)
+        async_result = run_budget_edit.delay(run_id, plan.id, new_plan.id, message)
+        cache.set(f"run:{run_id}",
+                  {"task_id": async_result.id, "plan_id": new_plan.id},
+                  timeout=60 * 60)
+        return Response({
+            "category": routed["category"],
+            "reason": routed["reason"],
+            "run_id": run_id,
+            "task_id": async_result.id,
+            "plan_id": new_plan.id,
+            "status": "accepted",
+        }, status=status.HTTP_202_ACCEPTED)
+
+    if routed["category"] != "국소수정":
+        # 알 수 없는 분류에 대한 안전망 (정상 흐름에서는 도달하지 않음)
+        return Response({
+            "category": routed["category"],
             "reason": routed["reason"],
             "supported": False,
-            "message": f"'{routed['category']}' 요청은 준비 중입니다. "
-                       "일정 조정(순서/개수/여유도) 요청은 바로 처리할 수 있어요.",
+            "message": f"'{routed['category']}' 분류를 처리할 수 없습니다.",
         })
     
     async_result = run_local_edit.delay(run_id, plan.id, message)
@@ -279,7 +379,82 @@ def trip_delete(request, request_id):
         return Response({"error": "여행 요청을 찾을 수 없습니다."},
                         status=status.HTTP_404_NOT_FOUND)
     
-    trip_request.delete()   # DASCADE: destinations, plans, flights, hotels, days, items
+    try:
+        trip_request.delete()   # CASCADE: destinations, plans, flights, hotels, days, items
+    except ProtectedError:
+        # 결제 기록(PROTECT FK)이 달린 여행은 강제 삭제 불가 — 돈이 얽힌 데이터 보호
+        return Response(
+            {"error": "결제 이력이 있는 여행은 삭제할 수 없습니다."},
+            status=status.HTTP_409_CONFLICT,
+        )
 
     # 204 No Content = "성공했고 돌려줄 내용이 없음"
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PlanBookSerializer(serializers.Serializer):
+    """Swagger 문서용 예약 요청 바디 스키마."""
+    first_name = serializers.CharField(help_text="게스트 이름 (영문, 예: MINJAE)")
+    last_name = serializers.CharField(help_text="게스트 성 (영문, 예: HEON)")
+    email = serializers.CharField(help_text="예약 확인 메일 주소")
+
+
+@extend_schema(request=PlanBookSerializer)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def plan_book(request, plan_id):
+    """
+    숙소 예약 접수 (샌드박스) — 에이전트가 MCP 예약 도구로 예약을 수행한다.
+
+    확정(confirmed)된 플랜만 예약 가능 — 상태 수명주기의 마지막 단계:
+    processing → draft → confirmed → (예약)
+
+    Response 202: {"run_id", "task_id"} → GET /agents/runs/{run_id}/ 폴링,
+                  result에 booking_status/booking_id/confirmation
+    Response 400/404
+    """
+    plan = _get_my_plan(request, plan_id)
+    if plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if plan.status != Plan.Status.CONFIRMED:
+        return Response(
+            {"error": f"확정된 플랜만 예약할 수 있습니다 (현재: {plan.status}). "
+                      "먼저 confirm을 호출하세요."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if getattr(plan, "hotel", None) is None:
+        return Response({"error": "이 플랜에는 선택된 숙소가 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # 결제 관문: 결제 완료(DONE) 없이는 예약 불가 — 결제 기능이 생긴 순간부터
+    # 이 직접 예약 경로는 "무결제 우회"가 되므로 여기서 차단한다.
+    # (결제 완료 시에는 confirm이 예약을 자동 접수하므로, 이 API는 사실상
+    #  재시도/수동 예약용 보조 경로가 된다)
+    from payments.models import Payment
+    if not plan.payments.filter(status=Payment.Status.DONE).exists():
+        return Response(
+            {"error": "결제가 완료되지 않은 플랜입니다. 먼저 결제를 진행해 주세요."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    first_name = request.data.get("first_name", "").strip()
+    last_name = request.data.get("last_name", "").strip()
+    email = request.data.get("email", "").strip()
+    if not first_name or not last_name or not email:
+        return Response({"error": "first_name, last_name, email이 모두 필요합니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    from agents.tasks import run_booking
+    run_id = uuid.uuid4().hex[:12]
+    async_result = run_booking.delay(run_id, plan.id, first_name, last_name, email)
+    cache.set(f"run:{run_id}", {"task_id": async_result.id, "plan_id": plan.id},
+              timeout=60 * 60)
+
+    return Response({
+        "run_id": run_id,
+        "task_id": async_result.id,
+        "status": "accepted",
+    }, status=status.HTTP_202_ACCEPTED)

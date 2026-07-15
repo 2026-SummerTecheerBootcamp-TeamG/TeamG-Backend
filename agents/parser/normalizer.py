@@ -10,19 +10,24 @@ intent_parser.py가 Claude 호출 후 이 모듈을 불러서 사용함.
 """
 import re
 
+# "N박M일" / "N박" 패턴 — 순수 숫자 파싱 전에 제거할 대상.
+# normalize_budget에서 "3박4일 300000원" 같은 입력일 때
+# "3"(박 앞자리)을 예산으로 잘못 읽는 걸 막기 위해 씀.
+_DURATION_PATTERN = re.compile(r"\d+박\s*\d*일?")
+
 
 def normalize_budget(text: str) -> int | None:
     """
     사용자 입력에서 예산 표현을 찾아 원(₩) 단위 정수로 변환.
 
     Claude가 "80만원"을 800000으로 못 바꿨을 때 이 함수가 대신 처리함.
-    
+
     처리하는 패턴:
         "80만"      → 800000   (만 단위)
         "80만원"    → 800000   (만 단위 + 원)
         "100만원"   → 1000000  (100만)
         "15만 5천"  → 155000   (만 + 천 조합)
-        "800000"    → 800000   (이미 숫자면 그대로)
+        "800000"    → 800000   (이미 숫자면 그대로, 단 기간 표현은 제외하고 탐색)
 
     Args:
         text: 사용자 원본 입력 문자열
@@ -47,13 +52,19 @@ def normalize_budget(text: str) -> int | None:
     if match:
         return int(match.group(1)) * 10000
 
-    # 순수 숫자는 "만/천" 단위 표현이 없을 때만 시도
-    # "3박4일 80만" 같은 입력에서 3을 예산으로 잘못 읽는 버그 방지
-    # text는 위에서 이미 공백/쉼표 제거된 상태라 원본 text 따로 체크
+    # 순수 숫자는 "만/천" 단위 표현이 없을 때만 시도.
+    # 단, "3박4일" 같은 기간 표현이 먼저 있으면 그 안의 숫자가
+    # 좌측 우선 매칭으로 예산인 것처럼 잘못 잡히므로, 기간 패턴을
+    # 먼저 지운 텍스트에서 숫자를 찾는다.
+    # 예: "3박4일300000원" → 기간 패턴 제거 → "300000원" → 300000
     if "만" not in text and "천" not in text:
-        match = re.search(r"(\d+)", text)
+        stripped = _DURATION_PATTERN.sub("", text)
+        match = re.search(r"(\d+)", stripped)
         if match:
             return int(match.group(1))
+
+    return None
+
 
 def normalize_duration(text: str) -> dict | None:
     """
