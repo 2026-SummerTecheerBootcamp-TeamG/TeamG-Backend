@@ -388,8 +388,13 @@ def _fill_from_profile(parsed: dict, profile: dict) -> tuple[dict, list]:
     """
     filled = []  # 프로필로 채운 필드 목록
 
-    # 출발지가 없고 프로필에 기본 출발지가 있으면 채우기
-    if not parsed.get("origin") and profile.get("origin_iata"):
+    # 출발지가 없고 프로필에 기본 출발지가 있으면 채우기.
+    # Claude가 origin을 아예 null로 안 주고 {"city": null, "iata": null}처럼
+    # 값만 비운 dict로 줄 때가 있는데, 그러면 dict 자체는 참(truthy)이라
+    # "not parsed.get('origin')"이 False가 돼서 이 블록을 건너뛰어 버린다.
+    # -> iata가 실제로 비어있는지로 판단해야 함.
+    origin = parsed.get("origin") or {}
+    if not origin.get("iata") and profile.get("origin_iata"):
         parsed["origin"] = {
             "city": None,   # 도시명은 나중에 코드 매핑에서 채움
             "iata": profile["origin_iata"],

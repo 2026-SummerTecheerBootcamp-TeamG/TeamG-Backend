@@ -112,11 +112,18 @@ class CandidateScore:
     utility_score: 최종 만족도 점수 (0~100 범위로 클램프됨)
     reasons: 점수가 왜 이렇게 나왔는지 설명하는 문자열 리스트
              (나중에 예산 에이전트/UI에서 "왜 이 호텔이 추천됐는지" 보여줄 때 사용)
+    name/latitude/longitude: LiteAPI 정적 정보(/data/hotels)에서 온 표시용 필드.
+             점수 계산에는 안 쓰이지만, 최종 선택된 후보를 DB에 저장할 때
+             (trips/services.py) 실제 이름/좌표로 채우려면 여기까지 들고 와야 함.
     """
     hotel_id: str
     price_krw: float
     utility_score: float
     reasons: List[str] = field(default_factory=list)
+    name: Optional[str] = None
+    star_rating: Optional[int] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     def to_dict(self) -> dict:
         """예산 에이전트 등 다른 서비스에 넘길 때 쓰는 딕셔너리 변환"""
@@ -125,6 +132,10 @@ class CandidateScore:
             "krw": self.price_krw,
             "utility": self.utility_score,
             "reasons": self.reasons,
+            "name": self.name,
+            "star_rating": self.star_rating,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
         }
 
 
@@ -138,6 +149,9 @@ def score_candidate(
     star_rating: Optional[int],
     theme: Optional[str] = None,
     facilities: Optional[List[str]] = None,
+    name: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
 ) -> CandidateScore:
     """
     호텔 후보 1개에 대한 만족도 점수를 계산한다.
@@ -148,6 +162,8 @@ def score_candidate(
         star_rating: 성급 (1~5). 정보 없으면 None
         theme: 여행 테마 ('관광', '쇼핑' 등). 없으면 None
         facilities: 호텔 편의시설 리스트 (LiteAPI hotelFacilities). 없으면 None
+        name/latitude/longitude: 표시용 정적 정보. 점수 계산에는 안 쓰이고
+            결과에 그대로 실어 보내기만 함 (DB 저장 시 필요)
 
     Returns:
         CandidateScore (최종 점수 0~100 범위로 클램프됨)
@@ -174,6 +190,10 @@ def score_candidate(
         price_krw=price_krw,
         utility_score=final_score,
         reasons=reasons,
+        name=name,
+        star_rating=star_rating,
+        latitude=latitude,
+        longitude=longitude,
     )
 
 
@@ -191,6 +211,9 @@ def score_candidates(
                 "price_krw": float,
                 "star_rating": Optional[int],
                 "facilities": Optional[List[str]],
+                "name": Optional[str],
+                "latitude": Optional[float],
+                "longitude": Optional[float],
             }
             (hotel_search.HotelCandidate + clients.HotelStaticInfo를
              hotel_id 기준으로 합쳐서 이 형태로 만들어 넘기면 됨)
@@ -207,6 +230,9 @@ def score_candidates(
             star_rating=c.get("star_rating"),
             theme=theme,
             facilities=c.get("facilities"),
+            name=c.get("name"),
+            latitude=c.get("latitude"),
+            longitude=c.get("longitude"),
         )
         for c in candidates
     ]
@@ -241,5 +267,8 @@ def merge_candidates_with_static_info(
             "price_krw": candidate.min_price_amount,
             "star_rating": static_info.star_rating if static_info else None,
             "facilities": static_info.facilities if static_info else [],
+            "name": static_info.name if static_info else None,
+            "latitude": static_info.latitude if static_info else None,
+            "longitude": static_info.longitude if static_info else None,
         })
     return merged

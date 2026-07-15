@@ -117,12 +117,15 @@ def save_pipeline_result(plan_id, result):
             Hotel.objects.create(
                 plan=plan,
                 liteapi_hotel_id=hotel_id,
-                name=hotel_id,
+                name=raw.get("name") or hotel_id,
+                stars=raw.get("star_rating"),
                 price_krw=sel_hotel.get("krw") or 0,
                 price_original=sel_hotel.get("krw") or 0,
                 currency="KRW",
                 utility=sel_hotel.get("utility"),
                 utility_reasons=raw.get("reasons"),
+                latitude=raw.get("latitude"),
+                longitude=raw.get("longitude"),
                 detail=raw,
             )
 
@@ -429,12 +432,15 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
             Hotel.objects.create(
                 plan=new_plan,
                 liteapi_hotel_id=hotel_id,
-                name=hotel_id,      # static info 복구 시 보강 (기존과 동일 정책)
+                name=raw.get("name") or hotel_id,
+                stars=raw.get("star_rating"),
                 price_krw=sel_hotel.get("krw") or 0,
                 price_original=sel_hotel.get("krw") or 0,
                 currency="KRW",
                 utility=sel_hotel.get("utility"),
                 utility_reasons=raw.get("reasons"),
+                latitude=raw.get("latitude"),
+                longitude=raw.get("longitude"),
                 detail=raw,
             )
 
