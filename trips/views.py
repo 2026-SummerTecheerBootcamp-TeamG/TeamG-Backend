@@ -274,23 +274,29 @@ def plan_edit(request, plan_id):
         }, status=status.HTTP_202_ACCEPTED)
 
     if routed["category"] == "예산영향":
-        # 8b에서 실행으로 교체 예정
+        # 숙소 재검색 + 재배분 (항공/일정 고정) — 라우터 3갈래의 마지막 실행
+        from agents.tasks import run_budget_edit
+        new_plan = Plan.objects.create(request=plan.request, edit_request=message)
+        async_result = run_budget_edit.delay(run_id, plan.id, new_plan.id, message)
+        cache.set(f"run:{run_id}",
+                  {"task_id": async_result.id, "plan_id": new_plan.id},
+                  timeout=60 * 60)
+        return Response({
+            "category": routed["category"],
+            "reason": routed["reason"],
+            "run_id": run_id,
+            "task_id": async_result.id,
+            "plan_id": new_plan.id,
+            "status": "accepted",
+        }, status=status.HTTP_202_ACCEPTED)
+
+    if routed["category"] != "국소수정":
+        # 알 수 없는 분류에 대한 안전망 (정상 흐름에서는 도달하지 않음)
         return Response({
             "category": routed["category"],
             "reason": routed["reason"],
             "supported": False,
-            "message": "'예산영향' 요청은 준비 중입니다. "
-                       "일정 조정이나 조건 변경(날짜/인원/예산) 요청은 바로 처리할 수 있어요.",
-        })
-    
-    if routed["category"] != "국소수정":
-        # 예산영향/재계획은 분류·안내까지
-        return Response({
-            "caategory": routed["category"],
-            "reason": routed["reason"],
-            "supported": False,
-            "message": f"'{routed['category']}' 요청은 준비 중입니다. "
-                       "일정 조정(순서/개수/여유도) 요청은 바로 처리할 수 있어요.",
+            "message": f"'{routed['category']}' 분류를 처리할 수 없습니다.",
         })
     
     async_result = run_local_edit.delay(run_id, plan.id, message)
