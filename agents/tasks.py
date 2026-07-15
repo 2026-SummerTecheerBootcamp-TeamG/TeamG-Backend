@@ -319,3 +319,92 @@ def run_booking(run_id, plan_id, first_name, last_name, email):
         "confirmation": booking_row.confirmation,
         "summary": summary,
     }
+
+
+@shared_task(name="agents.run_budget_edit")
+def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
+    """
+    예산영향 수정: 숙소만 재검색 → 기존 항공 고정 → 재배분 → 새 버전.
+
+    수정 라우터 3갈래의 마지막 조각 (국소수정/재계획은 기구현).
+    예: "숙소를 더 좋은 걸로 바꿔줘" — 항공/일정은 그대로, 숙소와 예산 배분만 다시.
+    """
+    from trips.models import Plan
+    from trips.services import save_budget_edited_version
+
+    old_plan = Plan.objects.get(id=old_plan_id)
+    new_plan = Plan.objects.get(id=new_plan_id)
+    tr = old_plan.request
+    dest = tr.destinations.first()
+
+    # ── 1. 숙소 재검색 (A방식 — 수정 요청을 선호 조건으로 전달) ─────────
+    mission = (
+        f"숙소를 다시 검색합니다. 사용자의 수정 요청: \"{edit_request}\"\n"
+        f"- 도시: {dest.city_en or dest.city_name} / 국가코드: {dest.country_code or 'JP'}\n"
+        f"- 체크인: {tr.start_date} / 체크아웃: {tr.end_date} / 성인: {tr.adult}명\n"
+        f"절차: 객실 배분 → 숙소 검색 → 후보 평가(점수)까지 수행하세요. "
+        f"항공/예약 관련 도구는 사용하지 마세요. "
+        f"수정 요청의 선호(등급/위치/분위기 등)를 평가에 반영하세요. "
+        f"최종 답변은 후보 요약만 간단히."
+    )
+    collected = {}
+    asyncio.run(run_agent_loop(run_id, mission,
+                               collected=collected, finish_trace=False))
+    hotel_options = collected.get("hotel_options", [])
+    trace.publish(run_id, "data", "orchestrator", "숙소 재검색 완료",
+                  f"후보 {len(hotel_options)}건")
+
+    if not hotel_options:
+        trace.done(run_id, "예산영향 수정 중단: 숙소 후보 없음")
+        return {"run_id": run_id,
+                "error": "조건에 맞는 숙소 후보를 찾지 못했습니다. 조건을 바꿔 다시 시도해 주세요."}
+
+    # ── 2. 재배분: 기존 선택 항공을 "고정 옵션 1개"로 투입 ──────────────
+    # 옵션이 1개면 그리디 엔진은 항공을 못 바꾸므로 자연스럽게 고정된다
+    old_flight = getattr(old_plan, "flight", None)
+    flight_options = []
+    if old_flight:
+        flight_options = [{
+            "label": old_flight.airline,
+            "krw": old_flight.price_krw,
+            "utility": float(old_flight.utility) if old_flight.utility is not None else None,
+            "raw": old_flight.slices,
+        }]
+
+    days = (tr.end_date - tr.start_date).days + 1
+    travelers = tr.adult + tr.kid
+    allocation = allocate_budget(
+        total_budget=tr.total_budget,
+        flight_options=flight_options,
+        hotel_options=hotel_options,
+        days=days,
+        travelers=travelers,
+    )
+    trace.publish(run_id, "rule", "budget", "재배분 완료",
+                  str(allocation.get("status", "")))
+
+    # ── 3. 재배분 설명 (LLM) ─────────────────────────────────────────────
+    trace.publish(run_id, "llm", "claude", "재배분 설명 생성")
+    explanation = explain_allocation(
+        {
+            "목적지": dest.city_name,
+            "수정요청": edit_request,
+            "총예산_KRW": tr.total_budget,
+        },
+        allocation,
+        language_for_nationality(getattr(tr.user, "nationality", None)),
+    )
+
+    # ── 4. 새 버전 저장 (배분/숙소 새것, 항공/일정 원본 유지) ───────────
+    save_budget_edited_version(old_plan, new_plan, allocation, explanation)
+    trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
+                  f"plan {old_plan_id} -> {new_plan.id}")
+    trace.done(run_id, "예산영향 수정 완료")
+
+    return {
+        "run_id": run_id,
+        "old_plan_id": old_plan_id,
+        "new_plan_id": new_plan.id,
+        "allocation": allocation,
+        "explanation": explanation,
+    }

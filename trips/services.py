@@ -392,3 +392,68 @@ def save_booking(plan, guest_first, guest_last, guest_email, booking_data):
         guest_email=guest_email,
         detail=data or None,
     )
+
+
+def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
+    """
+    예산영향 수정의 새 버전 완성: 배분/숙소는 새것, 항공/일정은 원본 유지.
+
+    왜 항공은 복사인가: 예산영향 수정(예: "숙소 업그레이드")에서 항공은
+    이미 확정된 선택이므로 고정 — 재배분 엔진에도 그 1개만 옵션으로 넣었다.
+    왜 일정은 복사인가: 숙소가 바뀌어도 방문지 동선은 그대로 (일정 변경은 국소수정 관할).
+    """
+    selection = allocation.get("selection") or {}
+
+    with transaction.atomic():
+        new_plan.allocation = allocation
+        # 배분 설명은 allocation과 함께 result로 반환되고, 일정 설명(narrative)은 불변
+        new_plan.narrative = old_plan.narrative
+        new_plan.status = Plan.Status.DRAFT
+        new_plan.save()
+
+        # 항공: 원본 선택 그대로 복사 (고정)
+        old_flight = getattr(old_plan, "flight", None)
+        if old_flight:
+            Flight.objects.create(
+                plan=new_plan, airline=old_flight.airline,
+                price_krw=old_flight.price_krw, price_original=old_flight.price_original,
+                currency=old_flight.currency, utility=old_flight.utility,
+                utility_reasons=old_flight.utility_reasons, slices=old_flight.slices,
+            )
+
+        # 숙소: 재배분이 고른 새 선택
+        sel_hotel = selection.get("hotel")
+        if sel_hotel:
+            raw = sel_hotel.get("raw") or {}
+            hotel_id = str(sel_hotel.get("label") or "?")
+            Hotel.objects.create(
+                plan=new_plan,
+                liteapi_hotel_id=hotel_id,
+                name=hotel_id,      # static info 복구 시 보강 (기존과 동일 정책)
+                price_krw=sel_hotel.get("krw") or 0,
+                price_original=sel_hotel.get("krw") or 0,
+                currency="KRW",
+                utility=sel_hotel.get("utility"),
+                utility_reasons=raw.get("reasons"),
+                detail=raw,
+            )
+
+        # 일정: 원본 행 통째 복사 (이동시간 포함 — 내용 동일하므로 전부 유효)
+        for day in old_plan.days.all():
+            day_row = ItineraryDay.objects.create(
+                plan=new_plan, day_number=day.day_number,
+                city_name=day.city_name, date=day.date,
+            )
+            for item in day.items.all():
+                ItineraryItem.objects.create(
+                    day=day_row, visit_order=item.visit_order,
+                    place_name=item.place_name,
+                    latitude=item.latitude, longitude=item.longitude,
+                    place_detail=item.place_detail,
+                    arrival_time=item.arrival_time,
+                    duration_min=item.duration_min, est_cost=item.est_cost,
+                    travel_min_to_next=item.travel_min_to_next,
+                    travel_mode=item.travel_mode,
+                )
+
+    return new_plan
