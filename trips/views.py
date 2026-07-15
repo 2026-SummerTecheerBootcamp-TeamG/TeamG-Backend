@@ -16,6 +16,10 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from trips.models import TripRequest, Plan
+# payments.models만 가져온다 (payments.views가 아님) — payments.views는 이미
+# trips.views의 _get_my_plan을 가져다 쓰고 있어서, 여기서 payments.views를
+# 반대로 가져오면 순환 임포트가 생긴다. models끼리는 서로 참조 안 하니 안전하다.
+from payments.models import Payment
 
 from django.core.cache import cache
 from rest_framework import serializers
@@ -120,7 +124,11 @@ def _hotel_booking_url(hotel, trip_request):
 def plan_detail(request, plan_id):
     """
     플랜 상세 - 배분/설명문/선택 항공 및 숙소/일자별 일정 전부
-    
+
+    payment(결제 상세)/bookings(예약 이력)를 합치면 "결제→예약" 흐름을
+    프론트가 이 API 하나로 재구성할 수 있다. payment는 결제 완료(DONE) 건이
+    없으면 null, bookings는 시도 자체가 없었으면 빈 배열([]).
+
     Response 200: 아래 조립 참조 / Response 404: 없거나 남의 플랜
     """
 
@@ -135,12 +143,28 @@ def plan_detail(request, plan_id):
     flight = getattr(plan, "flight", None)
     hotel = getattr(plan, "hotel", None)
 
+    # 결제 완료(DONE) 건만 찾는다 — READY(결제창 열기 전)/ABORTED(승인 실패)는
+    # "결제됐다"고 보여주면 안 되는 상태라 제외. 같은 플랜에 DONE이 두 개 이상
+    # 생길 일은 없다 (payment_prepare가 이미 결제완료된 플랜은 막음, trips/views.py
+    # 밖 payments/views.py:63-65 참고) — 그래도 혹시 몰라 .first()로 안전하게.
+    payment = plan.payments.filter(status=Payment.Status.DONE).first()
+
     return Response({
         "plan_id": plan.id,
         "request_id": plan.request_id,
         "status": plan.status,
         "allocation": plan.allocation,
         "narrative": plan.narrative,
+        # 결제 상세 — 프론트가 "결제 완료" 화면을 나중에 다시 열어도(새로고침 등)
+        # 이 필드 하나로 얼마를/언제/무엇으로 냈는지 그릴 수 있게 하려고 추가.
+        # 결제 전이거나 승인 실패면 payment가 None이라 전체가 null로 내려감.
+        "payment": {
+            "status": payment.status,
+            "amount": payment.amount,
+            "method": payment.method,
+            "order_name": payment.order_name,
+            "approved_at": payment.approved_at,
+        } if payment else None,
         "flight": {
             "airline": flight.airline,
             "price_krw": flight.price_krw,
