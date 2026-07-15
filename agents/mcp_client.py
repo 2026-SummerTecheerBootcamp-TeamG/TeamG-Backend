@@ -49,6 +49,9 @@ def _server_specs():
                           os.path.join(_REPO_ROOT, "agents", "accommodation", "mcp_server.py")],
         "booking": [sys.executable,
                     os.path.join(_REPO_ROOT, "agents", "booking", "mcp_server.py")],
+        # 4번째 서버 — 자체 제작 공급자 (재고 원장 = 우리 DB, hold→reserve 2단계)
+        "activity_provider": [sys.executable,
+                              os.path.join(_REPO_ROOT, "provider", "mcp_server.py")],
     }
 
     # LiteAPI 공식 MCP 서버 (Node.js) — 설치된 환경에서만 등록 (선택적).
