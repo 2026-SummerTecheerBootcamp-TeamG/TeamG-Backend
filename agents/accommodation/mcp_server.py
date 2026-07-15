@@ -197,8 +197,10 @@ def accommodation_score_candidates(
                해당 없으면 생략.
 
     Returns:
-        {"scored_candidates": [{"hotel_id":.., "krw":.., "utility":.., "reasons":[...]}, ...]}
-        (utility 점수 내림차순 정렬됨)
+        {"scored_candidates": [{"hotel_id":.., "krw":.., "utility":.., "reasons":[...],
+         "name":.., "star_rating":.., "latitude":.., "longitude":..}, ...]}
+        (utility 점수 내림차순 정렬됨. name/latitude/longitude는 LiteAPI 정적 정보
+         조회가 실패했거나 매칭 안 되면 None)
     """
     if not candidates:
         return {"scored_candidates": []}

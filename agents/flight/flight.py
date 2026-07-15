@@ -35,13 +35,22 @@ def score_utility(is_direct: bool, departure_hour: int, arrival_hour: int) -> fl
 
 
 def make_candidate(airline: str, krw: int, is_direct: bool,
-                   departure_hour: int, arrival_hour: int) -> dict:
+                   departure_hour: int, arrival_hour: int,
+                   departure_time: str | None = None, arrival_time: str | None = None,
+                   duration_min: int | None = None, stops: int = 0) -> dict:
     # 항공권 정보를 예산 에이전트 사용할 형식으로 변환
     return {
         "label": airline,
         "krw": krw,
         "utility": score_utility(is_direct, departure_hour, arrival_hour),
-        "raw": {"is_direct": is_direct},   # 원본 참고 데이터
+        "raw": {
+            "is_direct": is_direct,
+            # "2026-08-09 12:30" 형식 (SerpApi 원본 그대로) - 가는 편 기준
+            "departure_time": departure_time,
+            "arrival_time": arrival_time,
+            "duration_min": duration_min,
+            "stops": stops,
+        },
     }
 
 
@@ -97,6 +106,10 @@ def parse_flight(raw_flight: dict) -> dict:
         is_direct=is_direct,
         departure_hour=departure_hour,
         arrival_hour=arrival_hour,
+        departure_time=departure_time,
+        arrival_time=arrival_time,
+        duration_min=raw_flight.get("total_duration"),
+        stops=len(flights) - 1,
     )
 
 

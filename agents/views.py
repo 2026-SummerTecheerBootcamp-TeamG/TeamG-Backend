@@ -33,6 +33,22 @@ from agents.trace import get_events, open_subscription
 from agents.parser import parse_intent, validate_slots
 
 
+def _user_profile(user) -> dict:
+    """
+    parse_intent()에 넘길 유저 프로필.
+
+    User.default_departure는 {"city": "Seoul", "iata": "ICN"} 형태의
+    JSONField라서, origin_iata에는 iata 문자열만 뽑아 넣어야 한다.
+    (그대로 dict를 넣으면 parsed["origin"]["iata"]가 dict가 되어버려서
+    이후 "{iata}" 같은 문자열 조립에서 깨진다)
+    """
+    departure = getattr(user, "default_departure", None) or {}
+    return {
+        "origin_iata": departure.get("iata") if isinstance(departure, dict) else None,
+        "nationality": getattr(user, "nationality", "KR"),
+    }
+
+
 class ParseRequestSerializer(serializers.Serializer):
     """
     Swagger 문서용 요청 바디 스키마 정의.
@@ -87,10 +103,7 @@ def parse_request(request):
 
     # ── Step 2. 유저 프로필 기본값 가져오기 ──────────────────────────────
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     # ── Step 3. 자연어 파싱 실행 ─────────────────────────────────────────
     try:
@@ -198,10 +211,7 @@ def parse_answer(request):
     merged_message = f"{original_message} {answer}"
 
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     try:
         parsed = parse_intent(merged_message, user_profile)
@@ -393,10 +403,7 @@ def parse_correct(request, parse_id):
     merged_message = f"{original_message} {field}은(는) {value}으로 수정"
 
     user = request.user
-    user_profile = {
-        "origin_iata": getattr(user, "default_departure", "ICN"),
-        "nationality": getattr(user, "nationality", "KR"),
-    }
+    user_profile = _user_profile(user)
 
     try:
         parsed = parse_intent(merged_message, user_profile)

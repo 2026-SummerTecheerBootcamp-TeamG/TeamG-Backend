@@ -146,6 +146,11 @@ def plan_detail(request, plan_id):
             "price_krw": flight.price_krw,
             "utility": flight.utility,
             "booking_url": _flight_booking_url(plan.request),
+            # slices는 agents/flight/flight.py의 make_candidate()가 채운 raw 값
+            "departure_time": (flight.slices or {}).get("departure_time"),
+            "arrival_time": (flight.slices or {}).get("arrival_time"),
+            "duration_min": (flight.slices or {}).get("duration_min"),
+            "stops": (flight.slices or {}).get("stops"),
         } if flight else None,
         "hotel": {
             "liteapi_hotel_id": hotel.liteapi_hotel_id,
@@ -153,6 +158,9 @@ def plan_detail(request, plan_id):
             "price_krw": hotel.price_krw,
             "utility": hotel.utility,
             "booking_url": _hotel_booking_url(hotel, plan.request),
+            "stars": hotel.stars,
+            "latitude": hotel.latitude,
+            "longitude": hotel.longitude,
         } if hotel else None,
         "days": [
             {
@@ -275,6 +283,16 @@ def plan_edit(request, plan_id):
 
     if routed["category"] == "예산영향":
         # 숙소 재검색 + 재배분 (항공/일정 고정) — 라우터 3갈래의 마지막 실행
+        # 이 편집은 "기존 항공을 고정한 채" 숙소만 다시 고르는 방식이라,
+        # 원본 플랜에 애초에 선택된 항공이 없으면(예산 부족으로 무선택이었던 경우)
+        # 고정할 대상이 없어 재배분이 무조건 no_flights로 끝난다. 그 전에 막는다.
+        if getattr(plan, "flight", None) is None:
+            return Response(
+                {"error": "이 플랜은 선택된 항공이 없어 예산영향 수정을 진행할 수 없습니다. "
+                          "예산을 늘리거나 조건을 바꿔 처음부터 다시 만들어 주세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         from agents.tasks import run_budget_edit
         new_plan = Plan.objects.create(request=plan.request, edit_request=message)
         async_result = run_budget_edit.delay(run_id, plan.id, new_plan.id, message)

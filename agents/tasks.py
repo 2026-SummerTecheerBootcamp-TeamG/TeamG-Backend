@@ -79,7 +79,10 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
         f"성인 {adults}명"
         + (f", 어린이 {children}명" if children else "")
         + f"이 {fields['dates']['start']}부터 {fields['dates']['end']}까지 "
-        + f"{origin.get('city', '서울')}({origin.get('iata', 'ICN')})에서 "
+        # .get(key, default)는 키가 "없을" 때만 default를 쓴다. origin이
+        # {"city": None, "iata": None}처럼 값이 채워진 채로 비어있으면 그대로
+        # None이 나와 "None(None)에서"라는 문장이 만들어지므로 or로 방어한다.
+        + f"{origin.get('city') or '서울'}({origin.get('iata') or 'ICN'})에서 "
         + f"{dest_names}(으)로 여행합니다. 테마: {', '.join(themes) or '없음'}. "
         + "왕복 항공권 후보와 호텔 후보를 검색하고 점수 평가까지 해주세요. "
         + "최종 답변은 검색 결과 요약만 간단히 작성하세요."
