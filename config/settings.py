@@ -207,3 +207,12 @@ CORS_ALLOWED_ORIGINS = [
     for o in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
     if o.strip()
 ] or ["http://localhost:5173"]
+
+# CSRF_TRUSTED_ORIGINS: https 뒤에서 admin 등 폼 제출을 허용할 출처.
+# (API는 JWT라 CSRF와 무관하지만, /admin 화면은 세션+CSRF를 쓰므로 필요)
+# 운영 .env 예: CSRF_TRUSTED_ORIGINS=https://api.tripcanvas.cloud
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
+]
