@@ -282,11 +282,18 @@ class Booking(models.Model):
         CONFIRMED = "confirmed", "확정"
         FAILED = "failed", "실패"
 
+    class Kind(models.TextChoices):
+        HOTEL = "hotel", "숙소"
+        FLIGHT = "flight", "항공"
+
     plan = models.ForeignKey(
         Plan,
         on_delete=models.CASCADE,
         related_name="bookings",
     )
+    # 무엇의 예약인지 — 항공 mock 발권이 생기며 한 테이블에 두 종류가 공존
+    # (default=hotel: 기존 행들은 전부 숙소 예약이므로 마이그레이션이 안전)
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.HOTEL)
     status = models.CharField(max_length=12, choices=Status.choices)
     booking_id = models.CharField(max_length=100, null=True, blank=True)     # LiteAPI 예약 번호
     confirmation = models.CharField(max_length=100, null=True, blank=True)   # 호텔 확인 코드

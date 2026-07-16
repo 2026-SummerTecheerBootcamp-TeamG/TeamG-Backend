@@ -19,6 +19,7 @@
 """
 
 import anthropic
+import asyncio
 import json
 
 from agents.claude_client import DEFAULT_MODEL  # 팀 공용 모델명 재사용
@@ -36,13 +37,17 @@ MAX_TURNS = 8
 # 역할/규칙을 고정함
 SYSTEM_PROMPT = """당신은 여행 계획 서비스의 오케스트레이터입니다.
 사용자의 여행 요청을 처리하기 위해 제공된 도구(항공 검색, 숙소 검색 등)를
-스스로 판단하여 순서대로 호출하세요.
+스스로 판단하여 호출하세요.
 
 규칙:
 1. 도구가 반환한 데이터에 있는 정보만 사용하세요. 없는 정보를 지어내지 마세요.
 2. 숙소 검색 전에는 반드시 객실 배분 도구를 먼저 호출하세요.
-3. 도구가 오류나 0건을 반환하면, 조건을 바꿔 재시도하거나 그 사실을 솔직히 알리세요.
-4. 최종 답변은 한국어로, 항공/숙소 후보를 가격과 함께 정리해서 작성하세요."""
+3. 서로 결과를 쓰지 않는 독립적인 도구들은 반드시 "같은 턴에 한꺼번에" 호출하세요.
+   예: 항공 검색과 객실 배분은 서로 독립이므로 첫 턴에 함께 호출합니다.
+   (같은 턴의 도구들은 동시에 실행되어 전체 시간이 크게 줄어듭니다.
+    단, 한 도구의 출력이 다른 도구의 입력이면 턴을 나누세요 — 규칙 2처럼)
+4. 도구가 오류나 0건을 반환하면, 조건을 바꿔 재시도하거나 그 사실을 솔직히 알리세요.
+5. 최종 답변은 한국어로, 항공/숙소 후보를 가격과 함께 정리해서 작성하세요."""
 
 
 def _extract_final_text(response):
@@ -85,6 +90,11 @@ def _collect_candidates(tool_name, result_text, collected):
         # 예약 확정 결과 — 성공 응답만 수집 (DB 저장은 태스크가 담당)
         if isinstance(data, dict) and "error" not in data:
             collected["booking"] = data
+
+    elif tool_name == "flight_issue_ticket":
+        # mock 항공 발권 결과 — PNR이 있으면 성공으로 수집
+        if isinstance(data, dict) and data.get("pnr"):
+            collected["flight_ticket"] = data
 
     elif tool_name == "post_bookings":
         # LiteAPI "공식" MCP 서버의 예약 확정 툴 — 응답 구조가 우리 툴과 달라
@@ -142,11 +152,16 @@ async def run_agent_loop(run_id, user_message, collected=None, finish_trace=True
                 return final_text
             
             # Claude가 요청한 툴들을 실행하고, 결과를 tool_result 형식으로 수집
+            # 한 턴에 tool_use가 여러 개 온 것 자체가 "서로 결과에 의존하지
+            # 않으니 동시에 호출해도 된다"는 Claude의 판단이라 asyncio.gather로
+            # 병렬 실행한다 (한 툴의 출력을 다른 툴 입력으로 써야 하면 Claude가
+            # 턴을 나눠 순차 호출함 - 시스템 프롬프트 규칙 2번 참고)
+            results = await asyncio.gather(
+                *(hub.call(block.name, block.input) for block in tool_uses)
+            )
+
             tool_results = []
-            for block in tool_uses:
-                # block.name = 툴 이름
-                # block.id = 이 호출의 고유 번호
-                result_text = await hub.call(block.name, block.input)
+            for block, result_text in zip(tool_uses, results):
                 # 검색 툴 응답이면 후보를 원본 그대로 수집
                 if collected is not None:
                     _collect_candidates(block.name, result_text, collected)
