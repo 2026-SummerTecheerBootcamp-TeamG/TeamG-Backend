@@ -23,6 +23,10 @@ class Payment(models.Model):
         ABORTED = "ABORTED", "승인 실패"    # 토스 승인 거절/오류
         CANCELED = "CANCELED", "취소"       # (후속: 취소 기능용 자리)
 
+    class Target(models.TextChoices):
+        HOTEL = "hotel", "숙소"
+        FLIGHT = "flight", "항공"
+
     plan = models.ForeignKey(
         Plan,
         on_delete=models.PROTECT,       # 결제된 플랜은 삭제 불가
@@ -34,6 +38,10 @@ class Payment(models.Model):
         related_name="payments",
     )
 
+    # 무엇에 대한 결제인지 — 항공 결제(→mock 발권)가 생기며 한 플랜에 결제가
+    # 숙소/항공 각 1건씩 공존한다 (default=hotel: 기존 행은 전부 숙소 결제)
+    target = models.CharField(max_length=12, choices=Target.choices,
+                              default=Target.HOTEL)
     order_id = models.CharField(max_length=64, unique=True, db_index=True)
     order_name = models.CharField(max_length=100)       # 결제창에 표시될 이름
     amount = models.PositiveIntegerField()              # 서버가 정한 최종 금액 (KRW)
