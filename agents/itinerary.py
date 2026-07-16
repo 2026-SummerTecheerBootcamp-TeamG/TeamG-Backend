@@ -14,23 +14,36 @@ from agents.google_client import geocode, get_travel_time, haversine_km, search_
 logger = logging.getLogger(__name__)
 
 
-def _collect_places(queries: list[str], seen: set, center) -> list[dict]:
+# 장소가 아니라 '지역' 자체인 결과를 걸러내기 위한 타입 목록
+# (코펜하겐 사고: "Copenhagen 관광 명소" 검색이 도시 '코펜하겐' 1건만 반환 → 일정에 도시가 들어감)
+_NON_POI_TYPES = {
+    "locality", "sublocality", "country", "continent",
+    "administrative_area_level_1", "administrative_area_level_2",
+}
+
+
+def _collect_places(queries: list[str], seen: set, center, per_query: int = 20) -> list[dict]:
     """검색어 목록으로 장소를 모음
     seen 집합으로 중복 제거
-    
+
     seen을 공유하는 게 포인트
+    per_query=20: Places 요금은 '요청 횟수' 기준이라 8개나 20개나 같은 값 →
+                  최대치로 받아야 장기 여행(11박 등)에서 장소가 바닥나지 않음
     """
 
     lat, lng = (center if center else (None, None))
     collected = []
     for q in queries:
         try:
-            for p in search_places(q, latitude=lat, longitude=lng, max_results=8):
+            for p in search_places(q, latitude=lat, longitude=lng, max_results=per_query):
                 name = p.get("name")
                 # 이름 없음 / 이미 수집됨 / 좌표 없음 -> 제외
                 if not name or name in seen:
                     continue
                 if p.get("lat") is None or p.get("lng") is None:
+                    continue
+                # 도시/행정구역 자체가 검색 결과로 오면 제외 (방문지가 될 수 없음)
+                if _NON_POI_TYPES & set(p.get("types") or []):
                     continue
                 seen.add(name)
                 collected.append(p)
@@ -80,11 +93,16 @@ def _split_into_days(ordered: list[dict], num_days: int) -> list[list[dict]]:
 
     if num_days <= 0:
         return []
-    per_day = max(1, round(len(ordered) / num_days))
-    days = [ordered[i * per_day: (i + 1) * per_day] for i in range(num_days)]
-    leftover = ordered[num_days * per_day:]
-    if leftover:
-        days[-1].extend(leftover)   # 나머지는 마지막 날에
+    # divmod = 몫과 나머지를 한 번에: 17곳/11일 -> base 1, extra 6
+    # -> 앞의 6일은 2곳, 뒤의 5일은 1곳 (모든 날이 최대한 균등, 빈 날 최소화)
+    # (예전 방식은 round()로 하루치를 정한 뒤 나머지를 전부 마지막 날에 몰아서
+    #  장소가 부족하면 중간이 텅 비고 마지막 날만 4곳이 되는 문제가 있었음)
+    base, extra = divmod(len(ordered), num_days)
+    days, idx = [], 0
+    for i in range(num_days):
+        size = base + (1 if i < extra else 0)   # 나머지를 앞쪽 날들에 1곳씩 배분
+        days.append(ordered[idx: idx + size])
+        idx += size
     return days
 
 
@@ -136,10 +154,20 @@ def _build_city_days(destination: dict, themes: list[str], plan_days: int,
     # 수집: 맛짐을 먼저 모음
     # 순서가 중요한 이유: 테마가 맛집이면 테마 검색어와 맛집 검색어가 같아짐
     # 관광 쪽이 먼저 수집하면 seen 중복 제거에 걸려 맛집 슬롯이 비어버림
+    # 검색어는 한국어 + 영어 병행
+    # 이유(코펜하겐 사고): 한국인 리뷰가 적은 도시에서는 한국어 검색어가 무너짐 —
+    #   "Copenhagen 관광 명소" -> 도시 이름 1건, "Copenhagen 맛집" -> 한식당만 반환됨
+    #   (후쿠오카/파리는 한국어 데이터가 많아 우연히 통과했던 것)
+    # 영어 검색어가 현지 명소를 채우고, languageCode=ko라 표시 이름은 그대로 한국어로 옴
     seen: set = set()
-    foods = _collect_places([f"{city_en} 맛집"], seen, center)
+    foods = _collect_places(
+        [f"{city_en} 맛집", f"best restaurants in {city_en}"], seen, center)
     attraction_queries = [f"{city_en} {t}" for t in themes]
-    attraction_queries += [f"{city_en} 관광 명소", f"{city_en} 랜드마크"]
+    attraction_queries += [
+        f"{city_en} 관광 명소",
+        f"top tourist attractions in {city_en}",
+        f"famous landmarks in {city_en}",
+    ]
     attractions = _collect_places(attraction_queries, seen, center)
     logger.info("%s 장소 수집: 관광/테마 %d곳 . 맛집 %d곳", city, len(attractions), len(foods))
 
