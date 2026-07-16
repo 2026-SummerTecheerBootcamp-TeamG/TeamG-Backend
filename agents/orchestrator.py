@@ -19,6 +19,7 @@
 """
 
 import anthropic
+import asyncio
 import json
 
 from agents.claude_client import DEFAULT_MODEL  # 팀 공용 모델명 재사용
@@ -142,11 +143,16 @@ async def run_agent_loop(run_id, user_message, collected=None, finish_trace=True
                 return final_text
             
             # Claude가 요청한 툴들을 실행하고, 결과를 tool_result 형식으로 수집
+            # 한 턴에 tool_use가 여러 개 온 것 자체가 "서로 결과에 의존하지
+            # 않으니 동시에 호출해도 된다"는 Claude의 판단이라 asyncio.gather로
+            # 병렬 실행한다 (한 툴의 출력을 다른 툴 입력으로 써야 하면 Claude가
+            # 턴을 나눠 순차 호출함 - 시스템 프롬프트 규칙 2번 참고)
+            results = await asyncio.gather(
+                *(hub.call(block.name, block.input) for block in tool_uses)
+            )
+
             tool_results = []
-            for block in tool_uses:
-                # block.name = 툴 이름
-                # block.id = 이 호출의 고유 번호
-                result_text = await hub.call(block.name, block.input)
+            for block, result_text in zip(tool_uses, results):
                 # 검색 툴 응답이면 후보를 원본 그대로 수집
                 if collected is not None:
                     _collect_candidates(block.name, result_text, collected)
