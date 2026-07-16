@@ -88,7 +88,11 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
         + f"{origin.get('city') or '서울'}({origin.get('iata') or 'ICN'})에서 "
         + f"{dest_names}(으)로 여행합니다. 테마: {', '.join(themes) or '없음'}. "
         + "왕복 항공권 후보와 호텔 후보를 검색하고 점수 평가까지 해주세요. "
-        + "최종 답변은 검색 결과 요약만 간단히 작성하세요."
+        # 실측(2026-07-16): 최종 요약 작성에만 11초를 쓰고 있었는데 그 텍스트는
+        # 화면에 표시되지 않는다 (후보는 코드가 _collect_candidates로 수집).
+        # 그래서 한 문장으로 제한 — 파이프라인 전체에서 공짜로 ~10초 절약
+        + "모든 검색이 끝나면 최종 답변은 '검색 완료' 한 문장만 쓰세요. "
+        + "요약은 불필요합니다 — 후보 데이터는 시스템이 자동 수집합니다."
     )
 
     collected = {}  # 검색 후보가 담기는 곳

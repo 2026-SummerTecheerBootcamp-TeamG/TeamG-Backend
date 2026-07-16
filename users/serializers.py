@@ -141,3 +141,61 @@ class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["user_id", "nickname", "email", "nationality", "default_departure"]
+
+
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """
+    프로필 수정 Serializer — PATCH /api/v1/users/me/profile
+
+    partial 업데이트 전제: 보낸 필드만 갱신된다 (안 보낸 필드는 그대로).
+    """
+
+    nationality = serializers.CharField(
+        max_length=2,
+        required=False,
+        allow_blank=True,
+        error_messages={"max_length": "국가코드 2자리로 입력해 주세요. (예: KR)"},
+        help_text="ISO 3166-1 alpha-2 국가코드 (예: KR)",
+    )
+
+    class Meta:
+        model = User
+        fields = ["nickname", "email", "nationality", "default_departure"]
+        extra_kwargs = {
+            "nickname": {"required": False},
+            "email": {"required": False},
+            "default_departure": {"required": False},
+        }
+
+    def validate_email(self, value):
+        """
+        이메일 중복 검사 — 단, "내 현재 이메일 그대로"는 통과해야 하므로
+        나 자신(self.instance)은 검사 대상에서 제외한다.
+        """
+        if User.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
+            raise serializers.ValidationError("이미 사용 중인 이메일입니다.")
+        return value
+
+    def validate_nationality(self, value):
+        """SignupSerializer와 동일 규칙: 영문 2자리, 대문자 정규화"""
+        if not value:
+            return value
+        if not value.isalpha():
+            raise serializers.ValidationError(
+                "국가코드는 영문 2자리여야 합니다. (예: KR)"
+            )
+        return value.upper()
+
+    def validate_default_departure(self, value):
+        """
+        기본 출발지는 {"city": "서울", "iata": "ICN"} 형태의 dict여야 한다.
+        (파서가 프로필로 슬롯을 채울 때 dict를 기대 — 과거 문자열이 들어와
+         통합 버그를 냈던 그 지점이라 형태를 여기서 강제한다)
+        """
+        if value is None:
+            return value
+        if not isinstance(value, dict) or not str(value.get("city") or "").strip():
+            raise serializers.ValidationError(
+                '기본 출발지는 {"city": "서울", "iata": "ICN"} 형태로 보내주세요.'
+            )
+        return value

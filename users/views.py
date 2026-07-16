@@ -3,7 +3,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
-from .serializers import SignupSerializer, LoginSerializer, ProfileSerializer
+from .serializers import (
+    SignupSerializer, LoginSerializer, ProfileSerializer, ProfileUpdateSerializer,
+)
 
 
 class SignupView(APIView):
@@ -32,3 +34,19 @@ class ProfileView(APIView):
     def get(self, request):
         serializer = ProfileSerializer(request.user)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(request=ProfileUpdateSerializer, responses=ProfileSerializer,
+                   tags=["users"])
+    def patch(self, request):
+        """
+        프로필 수정 — 닉네임/이메일/국적/기본 출발지 (보낸 필드만 갱신)
+
+        partial=True: PATCH의 의미 그대로 "일부만" 보내도 된다.
+        응답은 조회와 같은 ProfileSerializer — 프론트가 갱신값을 바로 반영.
+        """
+        serializer = ProfileUpdateSerializer(
+            request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(ProfileSerializer(request.user).data,
+                        status=status.HTTP_200_OK)
