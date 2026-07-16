@@ -27,3 +27,7 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --build
             docker compose -f docker-compose.prod.yml exec -T web python manage.py migrate --noinput
             docker compose -f docker-compose.prod.yml exec -T web python manage.py collectstatic --noinput
+            # nginx는 시작할 때 web의 IP를 딱 한 번 기억한다.
+            # 위 up --build로 web이 재생성되어 IP가 바뀌면 nginx가 옛 IP를 물고 502를 내므로
+            # 배포 마지막에 nginx를 재시작해 새 IP를 다시 찾게 한다 (2026-07-16 502 장애 재발 방지)
+            docker compose -f docker-compose.prod.yml restart nginx
