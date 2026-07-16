@@ -36,5 +36,26 @@ services:
       - "5672:5672"     # Celery가 붙는 포트
       - "15672:15672"   # 웹 관리 UI (localhost:15672, guest/guest)
 
+ # -- Prometheus: 지표 수집 --
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: teamg-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # -- Grafana: 대시보드 --
+  grafana:
+    image: grafana/grafana:latest
+    container_name: teamg-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
 volumes:
-  pgdata:   # named volume 선언
+  pgdata:
+  grafana-data:
