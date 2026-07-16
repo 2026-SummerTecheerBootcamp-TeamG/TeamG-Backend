@@ -334,11 +334,26 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
     """
     from trips.models import Plan
     from trips.services import save_budget_edited_version
+    from agents.parser.normalizer import normalize_budget
 
     old_plan = Plan.objects.get(id=old_plan_id)
     new_plan = Plan.objects.get(id=new_plan_id)
     tr = old_plan.request
     dest = tr.destinations.first()
+
+    # "600만원으로 바꿔줘"처럼 총예산 자체를 지정한 경우, 그 금액으로 갱신.
+    # (지정이 없으면 "숙소를 더 좋은 걸로 바꿔줘"처럼 기존 총예산 안에서 재배분)
+    # "만"/"천"+"원"이 함께 있을 때만 시도 - normalize_budget은 이 표현이 없으면
+    # 아무 숫자나 예산으로 오인식하는 fallback이 있어, 무관한 숫자("2개", "4성급" 등)를
+    # 잘못 잡지 않도록 명확한 금액 표현이 있을 때만 호출한다.
+    requested_budget = None
+    if ("만" in edit_request or "천" in edit_request) and "원" in edit_request:
+        requested_budget = normalize_budget(edit_request)
+    if requested_budget and requested_budget != tr.total_budget:
+        trace.publish(run_id, "rule", "budget", "총예산 변경",
+                      f"{tr.total_budget}원 -> {requested_budget}원")
+        tr.total_budget = requested_budget
+        tr.save(update_fields=["total_budget"])
 
     # ── 1. 숙소 재검색 (A방식 — 수정 요청을 선호 조건으로 전달) ─────────
     mission = (
