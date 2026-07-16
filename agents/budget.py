@@ -30,7 +30,10 @@ ACTIVITY_TIERS = [
     ("넉넉", 100_000, 85.0), 
 ]
 
-RESERVE_RATIO = 0.05    # 예비비 기본값
+# 예비비 제거 (2026-07-16 결정): 예전 5%는 부족액 계산에까지 끼어들어
+# "예산은 500만인데 475만 기준으로 부족" 같은 직관에 어긋나는 표시를 만들었다.
+# 파라미터 자체는 남겨둠 — 필요해지면 호출자가 reserve_ratio=0.05로 되살릴 수 있음
+RESERVE_RATIO = 0.0
 MAX_GREEDY_STEPS = 6    # 업그레이드 최대 횟수
 
 # 후보에 만족도 점수가 빠져 있을 때 쓰는 중립값
@@ -109,7 +112,16 @@ def allocate_budget(
         return {
             "status": "insufficient", "total_budget": total_budget,
             "reserve": reserve, "spendable": spendable, "base": base,
-            "upgrades": [], "selection": None,
+            # selection에 최저가 조합을 담아 반환 (예전엔 None이었음)
+            # 이유: None이면 DB에 Flight/Hotel 스냅샷이 저장되지 않아서
+            # 화면에 "가격(breakdown)은 있는데 항공/숙소 정보는 없는" 반쪽 표시가 됐다.
+            # 부족 판정의 기준이 된 조합을 보여줘야 사용자가 "무엇이 얼마나 부족한지" 알 수 있음
+            "upgrades": [], "selection": {
+                "flight": fo[0], "hotel": ho[0],
+                "activity_tier": ACTIVITY_TIERS[0][0],
+                "activity_krw": _activity_cost(0, days, travelers),
+                "offer_expires_at": (fo[0].get("raw") or {}).get("expires_at"),
+            },
             "breakdown": {"flight_krw": fo[0]["krw"], "hotel_krw": ho[0]["krw"],
                           "activity_krw": _activity_cost(0, days, travelers)},
             "total_cost": base["total"],
