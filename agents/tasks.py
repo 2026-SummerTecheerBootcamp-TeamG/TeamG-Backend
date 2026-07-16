@@ -334,6 +334,65 @@ def run_booking(run_id, plan_id, first_name, last_name, email):
     }
 
 
+@shared_task(name="agents.run_flight_ticketing")
+def run_flight_ticketing(run_id, plan_id, lead_passenger, email):
+    """
+    항공 발권 태스크 (자체 mock 공급자) — 숙소 run_booking의 항공판.
+
+    실제 항공 발권은 판매자 라이선스가 필요해 학생 팀이 할 수 없으므로,
+    "판매자인 척" 하는 mock MCP 서버(flight-booking-agent)로 절차를 증명한다.
+    Claude가 운임 재확인 → 좌석 점유 → 발권 확정을 자율 수행하고,
+    만료 오류가 나면 스스로 처음부터 재시도한다 (숙소 예약과 동일 패턴).
+    """
+    from trips.models import Plan, Booking
+    from trips.services import save_booking
+
+    plan = Plan.objects.get(id=plan_id)
+    flight = getattr(plan, "flight", None)
+    if flight is None:
+        trace.done(run_id, "발권 중단: 선택된 항공 없음")
+        return {"run_id": run_id,
+                "error": "이 플랜에는 선택된 항공이 없어 발권할 수 없습니다."}
+
+    tr = plan.request
+    passengers = tr.adult + tr.kid
+    mission = (
+        f"다음 항공편을 발권하세요 (자체 mock 공급자 — 실제 결제 없음).\n"
+        f"- 항공사: {flight.airline}\n"
+        f"- 총액(KRW): {flight.price_krw}\n"
+        f"- 탑승 인원: {passengers}명\n"
+        f"- 대표 탑승자: {lead_passenger}\n"
+        f"절차: ① flight_fare_quote로 운임 재확인 ② flight_hold_seats로 좌석 점유 "
+        f"③ flight_issue_ticket으로 발권 확정. flight_fare_quote/flight_hold_seats/"
+        f"flight_issue_ticket 발권 계열 도구만 사용하세요 (검색·숙소 도구 금지). "
+        f"만료 오류가 나면 ①부터 다시 시도하세요. "
+        f"최종 답변에는 PNR(예약번호)과 총액을 요약하세요."
+    )
+
+    collected = {}
+    summary = asyncio.run(
+        run_agent_loop(run_id, mission, collected=collected, finish_trace=False)
+    )
+
+    ticket = collected.get("flight_ticket")
+    # save_booking이 기대하는 키(booking_id/confirmation)로 매핑 — PNR이 그 역할
+    data = ({"booking_id": ticket["pnr"], "confirmation": ticket["pnr"], **ticket}
+            if ticket else None)
+    row = save_booking(plan, lead_passenger, "", email, data,
+                       kind=Booking.Kind.FLIGHT)
+    trace.publish(run_id, "db", "postgres",
+                  f"발권 기록 저장 ({row.status})",
+                  f"PNR={row.booking_id or '-'}")
+    trace.done(run_id, "발권 절차 완료")
+
+    return {
+        "run_id": run_id,
+        "ticket_status": row.status,
+        "pnr": row.booking_id,
+        "summary": summary,
+    }
+
+
 @shared_task(name="agents.run_budget_edit")
 def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
     """

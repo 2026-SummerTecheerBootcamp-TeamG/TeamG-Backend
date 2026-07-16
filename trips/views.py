@@ -209,6 +209,7 @@ def plan_detail(request, plan_id):
         # 예약 이력 (샌드박스) — 성공/실패 재시도까지 시간순으로
         "bookings": [
             {
+                "kind": b.kind,     # hotel(숙소) / flight(항공 mock 발권)
                 "status": b.status,
                 "booking_id": b.booking_id,
                 "confirmation": b.confirmation,
@@ -474,6 +475,57 @@ def plan_book(request, plan_id):
     from agents.tasks import run_booking
     run_id = uuid.uuid4().hex[:12]
     async_result = run_booking.delay(run_id, plan.id, first_name, last_name, email)
+    cache.set(f"run:{run_id}", {"task_id": async_result.id, "plan_id": plan.id},
+              timeout=60 * 60)
+
+    return Response({
+        "run_id": run_id,
+        "task_id": async_result.id,
+        "status": "accepted",
+    }, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def plan_ticket_flight(request, plan_id):
+    """
+    항공 발권 접수 (자체 mock 공급자) — 에이전트가 발권 MCP 도구로 수행한다.
+
+    실제 항공 발권·정산은 판매자 라이선스가 필요해 구현할 수 없으므로,
+    "판매자인 척" 하는 mock 서버로 절차(운임 재확인→좌석 점유→발권)를 증명한다.
+    시뮬레이션이므로 결제 관문 없이 확정(confirmed) 플랜이면 접수한다.
+
+    Body: {"lead_passenger": 대표 탑승자 이름 (없으면 닉네임/이메일 앞부분)}
+    Response 202: {"run_id", "task_id"} → GET /agents/runs/{run_id}/ 폴링,
+                  result에 ticket_status/pnr
+    Response 400/404
+    """
+    plan = _get_my_plan(request, plan_id)
+    if plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if plan.status != Plan.Status.CONFIRMED:
+        return Response(
+            {"error": f"확정된 플랜만 발권할 수 있습니다 (현재: {plan.status}). "
+                      "먼저 confirm을 호출하세요."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if getattr(plan, "flight", None) is None:
+        return Response({"error": "이 플랜에는 선택된 항공이 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # 대표 탑승자: 요청에 없으면 닉네임 → 이메일 앞부분 순서로 대신 사용
+    lead = (request.data.get("lead_passenger") or "").strip()
+    if not lead:
+        lead = (getattr(request.user, "nickname", "") or
+                request.user.email.split("@")[0])
+
+    from agents.tasks import run_flight_ticketing
+    run_id = uuid.uuid4().hex[:12]
+    async_result = run_flight_ticketing.delay(
+        run_id, plan.id, lead, request.user.email)
     cache.set(f"run:{run_id}", {"task_id": async_result.id, "plan_id": plan.id},
               timeout=60 * 60)
 
