@@ -8,6 +8,9 @@ agents 앱의 Celery 태스크 모음
 import time
 from datetime import date
 import asyncio
+# LLM 설명 생성과 Google 일정 구성을 동시에 돌리기 위한 스레드 풀
+# (PoC에서 검증한 fan-out 패턴 — 45~58초를 23초로 줄였던 그 방식)
+from concurrent.futures import ThreadPoolExecutor
 
 # shared_task: config/celery.py의 app 객체를 직접 import하지 않고도 태스크를 등록하는 데코레이터
 from celery import shared_task
@@ -114,7 +117,9 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
     trace.publish(run_id, "rule", "budget", "예산 배분 완료",
                   str(allocation.get("status", "")))
     
-    # 3. 배분 설명 (LLM)
+    # 3+4. 배분 설명 (LLM) ∥ 일정 + 내러티브
+    # 설명 생성은 allocation만 있으면 되고 일정과는 서로 독립 →
+    # 스레드로 띄워두고 그동안 일정을 만들면 설명 LLM 시간(~8초)이 통째로 숨는다
     request_summary = {
         "목적지": dest_names,
         "기간": f"{days}일",
@@ -122,20 +127,25 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
         "테마": themes,
         "총예산_KRW": fields["budget"],
     }
-    trace.publish(run_id, "llm", "claude", "배분 설명 생성")
-    explanation = explain_allocation(
-        request_summary, allocation, language_for_nationality(nationality)
-    )
+    trace.publish(run_id, "llm", "claude", "배분 설명 생성 (일정 구성과 병렬)")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        explain_future = pool.submit(
+            explain_allocation, request_summary, allocation,
+            language_for_nationality(nationality),
+        )
 
-    # 4. 일정 + 내러티브
-    trace.publish(run_id, "api", "google", "일정 장소 수집/동선 계산")
-    plan_data = build_day_plan(
-        fields["destinations"], themes, fields["dates"]["start"]
-    )
-    trace.publish(run_id, "llm", "claude", "일정 내러티브 생성")
-    narrative = narrate_day_plan(
-        plan_data["city"], themes, plan_data["day_plan"]
-    )
+        trace.publish(run_id, "api", "google", "일정 장소 수집/동선 계산")
+        plan_data = build_day_plan(
+            fields["destinations"], themes, fields["dates"]["start"]
+        )
+        trace.publish(run_id, "llm", "claude", "일정 내러티브 생성")
+        narrative = narrate_day_plan(
+            plan_data["city"], themes, plan_data["day_plan"]
+        )
+
+        # .result() = 스레드가 끝날 때까지 기다렸다가 반환값 수령
+        # (스레드 안에서 난 예외도 이 지점에서 다시 던져짐 — 조용히 삼켜지지 않음)
+        explanation = explain_future.result()
 
     result = {
         "run_id": run_id,
@@ -334,11 +344,26 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
     """
     from trips.models import Plan
     from trips.services import save_budget_edited_version
+    from agents.parser.normalizer import normalize_budget
 
     old_plan = Plan.objects.get(id=old_plan_id)
     new_plan = Plan.objects.get(id=new_plan_id)
     tr = old_plan.request
     dest = tr.destinations.first()
+
+    # "600만원으로 바꿔줘"처럼 총예산 자체를 지정한 경우, 그 금액으로 갱신.
+    # (지정이 없으면 "숙소를 더 좋은 걸로 바꿔줘"처럼 기존 총예산 안에서 재배분)
+    # "만"/"천"+"원"이 함께 있을 때만 시도 - normalize_budget은 이 표현이 없으면
+    # 아무 숫자나 예산으로 오인식하는 fallback이 있어, 무관한 숫자("2개", "4성급" 등)를
+    # 잘못 잡지 않도록 명확한 금액 표현이 있을 때만 호출한다.
+    requested_budget = None
+    if ("만" in edit_request or "천" in edit_request) and "원" in edit_request:
+        requested_budget = normalize_budget(edit_request)
+    if requested_budget and requested_budget != tr.total_budget:
+        trace.publish(run_id, "rule", "budget", "총예산 변경",
+                      f"{tr.total_budget}원 -> {requested_budget}원")
+        tr.total_budget = requested_budget
+        tr.save(update_fields=["total_budget"])
 
     # ── 1. 숙소 재검색 (A방식 — 수정 요청을 선호 조건으로 전달) ─────────
     mission = (
