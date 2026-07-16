@@ -8,6 +8,8 @@ itinerary.py - 일정 에이전트
 
 import logging
 import math
+# 날짜별 이동시간(Routes API) 호출을 병렬로 돌리기 위한 스레드 풀
+from concurrent.futures import ThreadPoolExecutor
 
 from agents.google_client import geocode, get_travel_time, haversine_km, search_places
 
@@ -176,17 +178,28 @@ def _build_city_days(destination: dict, themes: list[str], plan_days: int,
     top_foods = _pick_top(foods, plan_days)
     attr_chunks = _split_into_days(_order_by_nearest(top_attractions), plan_days)
 
-    # 날짜별 구성: 그 날의 관광지들 + 맛집 1곳 -> 다시 동선 정렬 -> Item 변환
-    days = []
+    # 날짜별 구성 1단계: 그 날의 관광지들 + 맛집 1곳 -> 동선 재정렬 (API 호출 없음, 즉시 끝남)
+    day_stops = []
     for i in range(plan_days):
         stops = list(attr_chunks[i]) if i < len(attr_chunks) else []
         if i < len(top_foods):
             stops.append(top_foods[i])
-        stops = _order_by_nearest(stops)    # 맛집이 끼어들었으니 그 날 동선을 재정렬
+        day_stops.append(_order_by_nearest(stops))  # 맛집이 끼어들었으니 그 날 동선을 재정렬
+
+    # 날짜별 구성 2단계: 이동시간 부착 (_to_items 안의 Routes API 호출 = 일정 생성 최대 병목)
+    # 11박이면 leg가 20개 이상 — 직렬로는 수십 초 걸리므로 날짜 단위로 병렬 호출
+    # (날짜끼리는 서로 독립이라 안전. pool.map은 입력 순서대로 결과를 돌려줘서 날짜가 안 섞임)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        items_by_day = list(pool.map(
+            lambda stops: _to_items(stops, departure_time_iso), day_stops
+        ))
+
+    days = []
+    for i in range(plan_days):
         days.append({
             "day": day_offset + i + 1,  # 전체 여행 기준 통산 일차
             "city": city,               # ERD ItineraryDay.city_name - 멀티시티 구분용
-            "items": _to_items(stops, departure_time_iso),
+            "items": items_by_day[i],
         })
     return days
     
