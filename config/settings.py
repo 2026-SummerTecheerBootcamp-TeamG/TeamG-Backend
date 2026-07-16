@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'corsheaders',      # CORS - 다른 도메인(Vercel)의 브라우저 요청 허용
     'rest_framework',  # Django REST Framework — API 구현에 사용
     'drf_spectacular',
+    "django_prometheus",
     'users',    # User 모델
     'agents',   # 에이전트
     'trips',    # 여행 도메인 모델 (요청/플랜/일정, ERD 중 User 제외 8개)
@@ -63,6 +64,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     'corsheaders.middleware.CorsMiddleware',    # CORS 헤더는 가장 먼저 처리돼야 함
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -71,6 +73,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = 'config.urls'
