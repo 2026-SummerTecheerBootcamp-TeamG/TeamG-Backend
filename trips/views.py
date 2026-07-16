@@ -143,11 +143,28 @@ def plan_detail(request, plan_id):
     flight = getattr(plan, "flight", None)
     hotel = getattr(plan, "hotel", None)
 
-    # 결제 완료(DONE) 건만 찾는다 — READY(결제창 열기 전)/ABORTED(승인 실패)는
-    # "결제됐다"고 보여주면 안 되는 상태라 제외. 같은 플랜에 DONE이 두 개 이상
-    # 생길 일은 없다 (payment_prepare가 이미 결제완료된 플랜은 막음, trips/views.py
-    # 밖 payments/views.py:63-65 참고) — 그래도 혹시 몰라 .first()로 안전하게.
-    payment = plan.payments.filter(status=Payment.Status.DONE).first()
+    # 결제 완료(DONE) 건만, 대상별로 찾는다 — 이제 한 플랜에 숙소/항공 결제가
+    # 각각 존재할 수 있으므로 (READY/ABORTED는 "결제됐다"로 보여주면 안 되니 제외)
+    payment = plan.payments.filter(
+        status=Payment.Status.DONE, target=Payment.Target.HOTEL).first()
+    flight_payment = plan.payments.filter(
+        status=Payment.Status.DONE, target=Payment.Target.FLIGHT).first()
+
+    def _payment_dict(p):
+        """결제 상세 공통 조립 — 새로고침 후에도 결제 화면을 그릴 수 있게"""
+        return {
+            "status": p.status,
+            "amount": p.amount,
+            "method": p.method,
+            "order_name": p.order_name,
+            "approved_at": p.approved_at,
+        } if p else None
+
+    # 왕복 노선 표기 (ICN → FUK): 요청의 출발/첫 목적지 공항 코드
+    first_dest = plan.request.destinations.first()
+    route = (f"{plan.request.origin_iata} → {first_dest.iata_code}"
+             if plan.request.origin_iata and first_dest and first_dest.iata_code
+             else None)
 
     return Response({
         "plan_id": plan.id,
@@ -155,21 +172,14 @@ def plan_detail(request, plan_id):
         "status": plan.status,
         "allocation": plan.allocation,
         "narrative": plan.narrative,
-        # 결제 상세 — 프론트가 "결제 완료" 화면을 나중에 다시 열어도(새로고침 등)
-        # 이 필드 하나로 얼마를/언제/무엇으로 냈는지 그릴 수 있게 하려고 추가.
-        # 결제 전이거나 승인 실패면 payment가 None이라 전체가 null로 내려감.
-        "payment": {
-            "status": payment.status,
-            "amount": payment.amount,
-            "method": payment.method,
-            "order_name": payment.order_name,
-            "approved_at": payment.approved_at,
-        } if payment else None,
+        "payment": _payment_dict(payment),                # 숙소 결제
+        "flight_payment": _payment_dict(flight_payment),  # 항공 결제
         "flight": {
             "airline": flight.airline,
             "price_krw": flight.price_krw,
             "utility": flight.utility,
             "booking_url": _flight_booking_url(plan.request),
+            "route": route,     # "ICN → FUK" (왕복)
             # slices는 agents/flight/flight.py의 make_candidate()가 채운 raw 값
             "departure_time": (flight.slices or {}).get("departure_time"),
             "arrival_time": (flight.slices or {}).get("arrival_time"),
@@ -181,10 +191,14 @@ def plan_detail(request, plan_id):
             "name": hotel.name,
             "price_krw": hotel.price_krw,
             "utility": hotel.utility,
+            # 만족도 근거(성급/테마 가점 등) — 상세 정보 펼침에서 표시
+            "utility_reasons": hotel.utility_reasons,
             "booking_url": _hotel_booking_url(hotel, plan.request),
             "stars": hotel.stars,
             "latitude": hotel.latitude,
             "longitude": hotel.longitude,
+            # LiteAPI 응답 스냅샷에 주소가 있으면 노출 (없으면 null — FE가 숨김)
+            "address": (hotel.detail or {}).get("address"),
         } if hotel else None,
         "days": [
             {
@@ -459,9 +473,11 @@ def plan_book(request, plan_id):
     # (결제 완료 시에는 confirm이 예약을 자동 접수하므로, 이 API는 사실상
     #  재시도/수동 예약용 보조 경로가 된다)
     from payments.models import Payment
-    if not plan.payments.filter(status=Payment.Status.DONE).exists():
+    # 숙소 예약이므로 "숙소" 결제 완료를 요구 (항공 결제만으로는 통과 불가)
+    if not plan.payments.filter(status=Payment.Status.DONE,
+                                target=Payment.Target.HOTEL).exists():
         return Response(
-            {"error": "결제가 완료되지 않은 플랜입니다. 먼저 결제를 진행해 주세요."},
+            {"error": "숙소 결제가 완료되지 않은 플랜입니다. 먼저 결제를 진행해 주세요."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 

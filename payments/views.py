@@ -31,6 +31,9 @@ from trips.models import Plan
 class PrepareSerializer(serializers.Serializer):
     """Swagger 문서용 — 주문 준비 요청 바디."""
     plan_id = serializers.IntegerField(help_text="결제할 확정(confirmed) 플랜 ID")
+    target = serializers.ChoiceField(
+        choices=["hotel", "flight"], required=False, default="hotel",
+        help_text="결제 대상: hotel(숙소 예약) / flight(항공 발권)")
 
 
 @extend_schema(request=PrepareSerializer)
@@ -54,14 +57,33 @@ def payment_prepare(request):
         return Response({"error": f"확정된 플랜만 결제할 수 있습니다 (현재: {plan.status})."},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    hotel = getattr(plan, "hotel", None)
-    if hotel is None:
-        return Response({"error": "이 플랜에는 결제할 숙소가 없습니다."},
+    # 결제 대상: 숙소(기본) 또는 항공 — 항공도 토스 결제 후 mock 발권으로 이어진다
+    target = request.data.get("target") or Payment.Target.HOTEL
+    if target not in (Payment.Target.HOTEL, Payment.Target.FLIGHT):
+        return Response({"error": "target은 hotel 또는 flight여야 합니다."},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    # 중복 결제 방지: 이미 완료된 결제가 있으면 새 주문을 만들지 않는다
-    if plan.payments.filter(status=Payment.Status.DONE).exists():
-        return Response({"error": "이미 결제가 완료된 플랜입니다."},
+    dests = ", ".join(d.city_name for d in plan.request.destinations.all()) or "여행"
+
+    if target == Payment.Target.FLIGHT:
+        flight = getattr(plan, "flight", None)
+        if flight is None:
+            return Response({"error": "이 플랜에는 결제할 항공이 없습니다."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        order_name = f"{dests} 항공권 ({flight.airline})"[:100]
+        amount = flight.price_krw
+    else:
+        hotel = getattr(plan, "hotel", None)
+        if hotel is None:
+            return Response({"error": "이 플랜에는 결제할 숙소가 없습니다."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        order_name = f"{dests} 숙소 예약 ({hotel.name})"[:100]
+        amount = hotel.price_krw
+
+    # 중복 결제 방지: 같은 대상(target)의 완료 결제가 있으면 새 주문을 만들지 않는다
+    # (숙소를 결제했어도 항공은 아직 결제 가능해야 하므로 대상별로 검사)
+    if plan.payments.filter(status=Payment.Status.DONE, target=target).exists():
+        return Response({"error": "이미 결제가 완료된 항목입니다."},
                         status=status.HTTP_409_CONFLICT)
 
     client_key = os.environ.get("TOSS_CLIENT_KEY")
@@ -69,13 +91,13 @@ def payment_prepare(request):
         return Response({"error": "결제 설정(TOSS_CLIENT_KEY)이 없습니다."},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    dests = ", ".join(d.city_name for d in plan.request.destinations.all()) or "여행"
     payment = Payment.objects.create(
         plan=plan,
         user=request.user,
+        target=target,
         order_id=Payment.generate_order_id(plan.id),
-        order_name=f"{dests} 숙소 예약 ({hotel.name})"[:100],
-        amount=hotel.price_krw,        # ← 금액의 진실은 서버 계산값 하나뿐
+        order_name=order_name,
+        amount=amount,                 # ← 금액의 진실은 서버 계산값 하나뿐
     )
 
     return Response({
@@ -150,15 +172,24 @@ def payment_confirm(request):
             payment.approved_at = parse_datetime(result["approvedAt"])
         payment.raw_response = result
 
-        # ⭐ 결제 완료 → 예약 에이전트 자동 접수 (기존 run_booking 무수정 재사용)
-        # 게스트 = 결제자 가정 (MVP — 실서비스는 여권명 별도 입력 필요)
-        from agents.tasks import run_booking
+        # ⭐ 결제 완료 → 대상에 맞는 에이전트 자동 접수
+        #    숙소: run_booking (LiteAPI 샌드박스 예약)
+        #    항공: run_flight_ticketing (자체 mock 공급자 발권 → PNR)
+        # 게스트/탑승자 = 결제자 가정 (MVP — 실서비스는 여권명 별도 입력 필요)
         run_id = uuid.uuid4().hex[:12]
         user = payment.user
-        async_result = run_booking.delay(
-            run_id, payment.plan_id,
-            user.nickname or "GUEST", "TRAVELER", user.email,
-        )
+        if payment.target == Payment.Target.FLIGHT:
+            from agents.tasks import run_flight_ticketing
+            async_result = run_flight_ticketing.delay(
+                run_id, payment.plan_id,
+                user.nickname or user.email.split("@")[0], user.email,
+            )
+        else:
+            from agents.tasks import run_booking
+            async_result = run_booking.delay(
+                run_id, payment.plan_id,
+                user.nickname or "GUEST", "TRAVELER", user.email,
+            )
         cache.set(f"run:{run_id}",
                   {"task_id": async_result.id, "plan_id": payment.plan_id},
                   timeout=60 * 60)
