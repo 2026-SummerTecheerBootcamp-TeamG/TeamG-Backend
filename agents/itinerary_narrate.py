@@ -16,7 +16,10 @@ NARRATE_SYSTEM = (
     "방문지를 배치하고, 이동 시간이 있으면 자연스럽게 언급하세요. 맛집은 식사 시간대에 "
     "배치하면 좋습니다. travel_mode가 driving인 이동은 '택시로 약 N분'으로 표현하세요 "
     "(운전이 아니라 택시 이동입니다). 목록에 없는 장소를 지어내지 마세요. "
-    "날짜별로 3-5줄, 마지막 날 다음에 귀국일 안내 한 줄을 덧붙이세요. "
+    # 실측(2026-07-16): 내러티브 생성이 30초로 전체 최대 병목 — 생성 시간은
+    # 출력 길이에 비례하므로 분량을 줄이는 게 곧 속도다 (상세는 화면의
+    # 일정 타임라인이 이미 보여주고, DAY별 설명은 접혀 있음)
+    "날짜별로 2-3줄로 간결하게, 마지막 날 다음에 귀국일 안내 한 줄을 덧붙이세요. "
     "자연스러운 {language}로 작성하세요."
 )
 
@@ -33,9 +36,10 @@ def narrate_day_plan(city: str, themes: list[str] | None, day_plan: list[dict],
         "테마": themes or [],
         "날짜별_방문지": day_plan   # items의 place_detail/이동시간까지 통째로
     }
-    # max_tokens를 일수에 비례해 늘림 (하루 서술 ≈ 200~250토큰)
+    # max_tokens를 일수에 비례해 늘림 (하루 2-3줄 ≈ 150~200토큰)
     # 고정 1400이었을 때 11박 여행에서 8일차쯤에서 서술이 잘리는 사고가 있었음
-    max_tokens = min(4000, max(1400, 300 + 250 * len(day_plan)))
+    # 상한 3000: 생성 시간은 출력 길이에 비례 — 분량 축소와 세트인 속도 가드
+    max_tokens = min(3000, max(1000, 300 + 200 * len(day_plan)))
     return ask_claude(
         prompt=json.dumps(context, ensure_ascii=False, default=str),
         system=NARRATE_SYSTEM.format(language=language),
