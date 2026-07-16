@@ -33,9 +33,11 @@ def narrate_day_plan(city: str, themes: list[str] | None, day_plan: list[dict],
         "테마": themes or [],
         "날짜별_방문지": day_plan   # items의 place_detail/이동시간까지 통째로
     }
-    # max_tokens=1400
+    # max_tokens를 일수에 비례해 늘림 (하루 서술 ≈ 200~250토큰)
+    # 고정 1400이었을 때 11박 여행에서 8일차쯤에서 서술이 잘리는 사고가 있었음
+    max_tokens = min(4000, max(1400, 300 + 250 * len(day_plan)))
     return ask_claude(
         prompt=json.dumps(context, ensure_ascii=False, default=str),
         system=NARRATE_SYSTEM.format(language=language),
-        max_tokens=1400,
+        max_tokens=max_tokens,
     )

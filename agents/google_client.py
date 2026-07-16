@@ -38,7 +38,9 @@ def geocode(address: str, country_code: str | None = None) -> dict | None:
     
     params = {"address": address, "key": _require_key(), "language": "ko"}
     if country_code:
-        params["componenets"] = f"country:{country_code.upper()}"
+        # (오타 수정: componenets -> components. 오타 동안 국가 제한이 조용히 무시되고 있었음
+        #  = '코펜하겐 NY' 사고 방지 장치가 실제로는 꺼져 있던 상태)
+        params["components"] = f"country:{country_code.upper()}"
 
     response = requests.get(
         "https://maps.googleapis.com/maps/api/geocode/json",
