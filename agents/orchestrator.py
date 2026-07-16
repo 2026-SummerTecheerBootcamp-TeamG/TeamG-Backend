@@ -91,6 +91,11 @@ def _collect_candidates(tool_name, result_text, collected):
         if isinstance(data, dict) and "error" not in data:
             collected["booking"] = data
 
+    elif tool_name == "flight_issue_ticket":
+        # mock 항공 발권 결과 — PNR이 있으면 성공으로 수집
+        if isinstance(data, dict) and data.get("pnr"):
+            collected["flight_ticket"] = data
+
     elif tool_name == "post_bookings":
         # LiteAPI "공식" MCP 서버의 예약 확정 툴 — 응답 구조가 우리 툴과 달라
         # 여기서 우리 형식({"booking_id", "confirmation"})으로 맞춰 수집한다

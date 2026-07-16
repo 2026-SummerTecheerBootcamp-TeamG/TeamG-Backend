@@ -377,17 +377,21 @@ def update_request_fields(trip_request, fields, raw_parsed=None):
     return trip_request
 
 
-def save_booking(plan, guest_first, guest_last, guest_email, booking_data):
+def save_booking(plan, guest_first, guest_last, guest_email, booking_data,
+                 kind=Booking.Kind.HOTEL):
     """
     예약 시도 결과를 기록한다 (성공/실패 모두 — 실패도 이력이다).
 
-    booking_data: 오케스트레이터가 booking_confirm 툴 응답에서 수집한 dict
+    booking_data: 오케스트레이터가 booking_confirm(숙소) 또는
+                  flight_issue_ticket(항공 mock) 툴 응답에서 수집한 dict
                   (None이면 Claude가 예약 확정까지 도달하지 못한 것)
+    kind: 숙소/항공 구분 — 같은 테이블에 두 종류의 예약이 공존한다
     """
     data = booking_data or {}
     confirmed = bool(data.get("booking_id"))
     return Booking.objects.create(
         plan=plan,
+        kind=kind,
         status=Booking.Status.CONFIRMED if confirmed else Booking.Status.FAILED,
         booking_id=data.get("booking_id"),
         confirmation=data.get("confirmation"),

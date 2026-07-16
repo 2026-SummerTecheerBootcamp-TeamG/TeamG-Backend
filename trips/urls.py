@@ -20,6 +20,9 @@ urlpatterns = [
     # POST /api/v1/trips/plans/{plan_id}/book/      숙소 예약 접수 (샌드박스, 에이전트 수행)
     path("plans/<int:plan_id>/book/", views.plan_book, name="plan-book"),
 
+    # POST /api/v1/trips/plans/{plan_id}/ticket     항공 발권 접수 (자체 mock 공급자, 에이전트 수행)
+    path("plans/<int:plan_id>/ticket", views.plan_ticket_flight, name="plan-ticket"),
+
     # DELETE /api/v1/trips/{request_id}/            여행 요청 삭제
     path("<int:request_id>", views.trip_delete, name="trip-delete"),
 

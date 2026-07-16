@@ -52,6 +52,11 @@ def _server_specs():
         # 4번째 서버 — 자체 제작 공급자 (재고 원장 = 우리 DB, hold→reserve 2단계)
         "activity_provider": [sys.executable,
                               os.path.join(_REPO_ROOT, "provider", "mcp_server.py")],
+        # 5번째 서버 — 자체 mock 항공 발권 공급자 (멘토 피드백: "예약이 되는 척"
+        # 하는 서버로 결제/발권 시스템의 구현 가능성을 증명. 외부 API·키 없음)
+        "flight_booking": [sys.executable,
+                           os.path.join(_REPO_ROOT, "agents", "flight",
+                                        "booking_mcp_server.py")],
     }
 
     # LiteAPI 공식 MCP 서버 (Node.js) — 설치된 환경에서만 등록 (선택적).
