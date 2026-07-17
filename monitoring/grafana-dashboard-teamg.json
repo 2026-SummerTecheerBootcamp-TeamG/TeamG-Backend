@@ -49,7 +49,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(django_http_responses_total_by_status_total{status=~\"5..\"}[5m])) / sum(rate(django_http_responses_total_by_status_total[5m]))",
+          "expr": "(sum(rate(django_http_responses_total_by_status_total{status=~\"5..\"}[5m])) or vector(0)) / sum(rate(django_http_responses_total_by_status_total[5m]))",
           "legendFormat": "5xx 비율"
         }
       ]

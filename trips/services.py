@@ -180,14 +180,17 @@ def load_day_plan(plan):
     ]
 
 
-def create_edited_version(old_plan, edited, edit_request):
+def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
     """
     편집 결과로 새 버전을 만듦
-    
-    핵심 원칙: LLM은 이름만 골랐고, 데이터는 전부 원본 행에서 가져옴
-    - 원본에 없는 이름 -> 제외
+
+    핵심 원칙: LLM은 이름만 골랐고, 데이터는 전부 "실존 목록"에서 가져옴
+    - 원본 일정 or 추가 후보 풀(extra_pool, 구글 실검색 결과)에 있는 이름만 통과
+    - 둘 다에 없는 이름 -> 제외 (할루시네이션 차단은 그대로)
     - 이름 순서가 원본과 같은 날 -> 행을 통째로 복사
     - 순서/구성이 바뀐 날 -> 이동시간은 null
+
+    extra_pool: [{"name","lat","lng","rating","user_ratings","address"}, ...]
     """
 
     original = load_day_plan(old_plan)
@@ -197,6 +200,23 @@ def create_edited_version(old_plan, edited, edit_request):
     for d in original:
         for item in d["items"]:
             item_by_name[item["place_name"]] = item
+
+    # 추가 후보도 item 형태로 변환해 조회표에 합류 (원본과 이름이 겹치면 원본 우선)
+    for c in (extra_pool or []):
+        name = c.get("name")
+        if not name or name in item_by_name:
+            continue
+        item_by_name[name] = {
+            "place_name": name,
+            "lat": c.get("lat"), "lng": c.get("lng"),
+            "place_detail": {
+                "rating": c.get("rating"),
+                "user_ratings": c.get("user_ratings"),
+                "address": c.get("address"),
+            },
+            # 새 장소가 낀 날은 동선이 달라지므로 이동시간은 어차피 null 처리됨
+            "travel_min_to_next": None, "travel_mode": None,
+        }
     original_names = {d["day"]: [i["place_name"] for i in d["items"]] for d in original}
     city_by_day = {d["day"]: d.get("city") for d in original}
 

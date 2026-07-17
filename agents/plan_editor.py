@@ -35,7 +35,8 @@ EDIT_TOOL = {
                         "place_names": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "그 날 방문할 장소 이름들 (방문 순서대로, 현재 일정에 있는 이름만)",
+                            "description": "그 날 방문할 장소 이름들 (방문 순서대로, "
+                                           "현재 일정 또는 추가_가능_후보에 있는 이름만)",
                         },
                     },
                     "required": ["day", "place_names"],
@@ -51,25 +52,30 @@ EDITOR_SYSTEM = (
     "당신은 여행 일정 편집자입니다. 현재 일정과 수정 요청을 보고, "
     "날짜별로 '남길 장소 이름 목록'을 save_edited_itinerary 도구로 돌려주세요.\n"
     "\n"
-    "당신이 할 수 있는 것 (이 세 가지뿐입니다):\n"
+    "당신이 할 수 있는 것 (이 네 가지뿐입니다):\n"
     "A) 어떤 날의 장소를 빼기 (여유롭게/쉬고 싶다 → 평점 낮은 곳부터 뺌)\n"
     "B) 같은 날 안에서 순서 바꾸기\n"
     "C) 한 날짜의 장소를 다른 날짜로 옮기기 (빡빡하게/더 많이 → 다른 날에서 가져옴)\n"
+    "D) '추가_가능_후보' 목록의 장소를 일정에 추가하기 — 단, 요청이 새로운/다른 "
+    "장소를 원할 때만, 목록에 있는 이름 그대로만 (한 글자도 바꾸지 말 것)\n"
     "\n"
     "할 수 없는 것:\n"
-    "- 현재 일정에 없는 장소를 만들기 (새 장소가 필요한 요청이면 있는 장소 안에서 "
-    "최선을 다하고, summary에 '새 장소 추가는 재검색이 필요하다'고 적으세요)\n"
+    "- 현재 일정에도, 추가_가능_후보에도 없는 장소를 만들기 (적합한 후보가 없으면 "
+    "있는 장소 안에서 최선을 다하고, summary에 그 사실을 적으세요)\n"
     "\n"
     "판단 규칙:\n"
     "1) 언급되지 않은 날짜는 원래 이름·순서 그대로 유지\n"
     "2) 요청이 모호하면 작게 바꾸고, summary에 어떻게 해석했는지 명시\n"
     "3) 모든 날짜를 응답에 포함\n"
+    "4) 후보 추가는 요청을 충족하는 최소한으로 (한두 곳) — 일정을 새로 짜지 말 것\n"
 )
 
 
-def edit_day_plan(run_id, day_plan, edit_request):
+def edit_day_plan(run_id, day_plan, edit_request, extra_candidates=None):
     """
     day_plan: [{"day", "city", "items": [{"place_name", "place_detail", ...}]}]
+    extra_candidates: 신선 검색된 '추가 허용 후보' [{"name","rating",...}]
+                      (없으면 기존처럼 재배열/삭제만 가능)
     반환: {"days" [{"day", "place_names": [...]}], "summary": str}
     """
 
@@ -89,9 +95,18 @@ def edit_day_plan(run_id, day_plan, edit_request):
         for d in day_plan
     ]
 
+    payload = {"현재_일정": slim, "수정_요청": edit_request}
+    if extra_candidates:
+        # 새 장소 추가 요청에 쓸 수 있는 후보 (구글 실검색 결과 = 실존 장소만)
+        payload["추가_가능_후보"] = [
+            {"name": c.get("name"), "rating": c.get("rating")}
+            for c in extra_candidates
+        ]
+
     trace.publish(run_id, "llm", "일정편집기", "편집 요청",
-                  f"{len(day_plan)}일치 · \"{edit_request[:60]}\"")
-    
+                  f"{len(day_plan)}일치 · 추가후보 {len(extra_candidates or [])}곳 "
+                  f"· \"{edit_request[:60]}\"")
+
     response = _client.messages.create(
         model=DEFAULT_MODEL,
         max_tokens=1500,
@@ -100,10 +115,7 @@ def edit_day_plan(run_id, day_plan, edit_request):
         tool_choice={"type": "tool", "name": "save_edited_itinerary"},
         messages=[{
             "role": "user",
-            "content": json.dumps(
-                {"현재_일정": slim, "수정_요청": edit_request},
-                ensure_ascii=False,
-            ),
+            "content": json.dumps(payload, ensure_ascii=False),
         }],
     )
 

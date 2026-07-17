@@ -204,6 +204,40 @@ def _build_city_days(destination: dict, themes: list[str], plan_days: int,
     return days
     
 
+def collect_edit_candidates(city_en: str, country_code: str | None,
+                            edit_request: str, exclude_names: set,
+                            per_query: int = 10) -> list[dict]:
+    """
+    국소수정용 '추가 허용 후보' 검색.
+
+    배경: 편집기 LLM은 할루시네이션 방지를 위해 "실존 목록의 이름만" 고를 수
+    있는데, 원래는 그 목록이 현재 일정뿐이라 "다른 음식점 추가해줘" 같은
+    요청을 수행할 수 없었다 (오사카 실사용 피드백). 이 함수가 신선한 후보를
+    검색해 목록을 넓혀준다 — 원칙(실존 목록에서만 선택)은 그대로.
+
+    exclude_names: 현재 일정에 이미 있는 이름들 (중복 제안 방지)
+    """
+    geo = geocode(city_en, country_code=country_code)
+    center = (geo["lat"], geo["lng"]) if geo else None
+
+    # seen을 기존 일정 이름으로 시작 -> 이미 일정에 있는 곳은 후보에서 제외
+    seen = set(exclude_names)
+
+    # 수정 요청 문장 자체를 첫 검색어로 활용 — Places 텍스트 검색은 자연어에
+    # 강해서 "특별한 저녁" 같은 뉘앙스를 반영한 결과를 준다.
+    # 뒤의 고정 쿼리들은 안전망 (요청이 검색어로 부적합해도 후보가 비지 않게)
+    queries = []
+    req = (edit_request or "").strip()
+    if req:
+        queries.append(f"{city_en} {req[:40]}")
+    queries += [f"{city_en} 맛집", f"best restaurants in {city_en}",
+                f"{city_en} 관광 명소"]
+
+    candidates = _collect_places(queries, seen, center, per_query=per_query)
+    # 프롬프트 비대 방지: 인기도 상위 12곳까지만
+    return _pick_top(candidates, 12)
+
+
 def build_day_plan(destinations: list[dict], themes: list[str] | None = None,
                    start_date: str | None = None) -> dict:
     """일정의 데이터 부분을 만듦
