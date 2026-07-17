@@ -42,6 +42,31 @@ services:
       - prometheus
     networks: [backend]
 
+  # 로그 저장소 — Promtail이 밀어넣는 컨테이너 로그를 보관 (7일)
+  # Grafana에서 로그 검색 가능 (지금까지는 SSH로 docker logs를 쳐야 했음)
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: teamg-loki
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./monitoring/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    networks: [backend]
+    # 포트를 밖에 안 연다 — Grafana/Promtail만 내부 네트워크로 접근
+
+  # 로그 배달부 — 도커 컨테이너 로그를 읽어 Loki로 push
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: teamg-promtail
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./monitoring/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro      # 컨테이너 발견용
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro   # 로그 파일 읽기
+    depends_on:
+      - loki
+    networks: [backend]
+
   # 컨테이너별 리소스 지표 수집기 — 호스트의 도커 상태를 읽어야 해서
   # 시스템 경로들을 읽기 전용으로 마운트한다 (cAdvisor 공식 권장 구성)
   cadvisor:
@@ -63,3 +88,4 @@ networks:
 volumes:
   prometheus-data:
   grafana-data:
+  loki-data:
