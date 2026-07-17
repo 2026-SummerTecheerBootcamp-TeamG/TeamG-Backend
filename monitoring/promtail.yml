@@ -1,0 +1,29 @@
+# Promtail 설정 — 로그 배달부
+#
+# 역할: 이 호스트에서 도는 도커 컨테이너들의 로그를 실시간으로 읽어
+# Loki로 밀어넣는다(push). Prometheus가 지표를 "긁어가는" 것과 반대 방향.
+#
+# 원리: 도커 소켓으로 컨테이너 목록을 발견(docker_sd)하고,
+# 각 컨테이너의 로그 스트림을 따라 읽는다.
+
+server:
+  http_listen_port: 9080
+
+# 어디까지 읽었는지 기록 — 재시작해도 이어 읽기 (중복/누락 방지)
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      # 컨테이너 이름("/teamg-web")에서 앞 슬래시를 떼어 container 라벨로
+      # → Grafana에서 {container="teamg-web"} 으로 검색
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
