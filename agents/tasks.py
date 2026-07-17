@@ -186,13 +186,34 @@ def run_local_edit(run_id, plan_id, edit_request):
     from trips.models import Plan
     from trips.services import load_day_plan, create_edited_version
     from agents.plan_editor import edit_day_plan
+    from agents.itinerary import collect_edit_candidates
 
     old_plan = Plan.objects.get(id=plan_id)
     day_plan = load_day_plan(old_plan)
 
-    edited = edit_day_plan(run_id, day_plan, edit_request)
+    # "다른 음식점 추가해줘" 같은 요청에 대비해 신선한 후보를 미리 검색.
+    # (편집기는 실존 목록의 이름만 고를 수 있어서, 후보 없이는 추가가 불가능했음
+    #  — 오사카 실사용 피드백 반영. 검색 실패해도 편집 자체는 계속)
+    exclude = {item["place_name"] for d in day_plan for item in d["items"]}
+    extra_pool = []
+    for dest in old_plan.request.destinations.all():
+        try:
+            extra_pool += collect_edit_candidates(
+                dest.city_en or dest.city_name, dest.country_code,
+                edit_request, exclude,
+            )
+        except Exception as e:
+            trace.publish(run_id, "api", "google", "추가 후보 검색 실패(계속 진행)",
+                          str(e)[:120])
+    if extra_pool:
+        trace.publish(run_id, "api", "google", "추가 후보 검색",
+                      f"{len(extra_pool)}곳 (새 장소 추가 요청 대비)")
 
-    new_plan, dropped = create_edited_version(old_plan, edited, edit_request)
+    edited = edit_day_plan(run_id, day_plan, edit_request,
+                           extra_candidates=extra_pool)
+
+    new_plan, dropped = create_edited_version(old_plan, edited, edit_request,
+                                              extra_pool=extra_pool)
 
     from trips.services import load_day_plan
     from agents.itinerary_narrate import narrate_day_plan
