@@ -528,8 +528,13 @@ def run_create(request):
                 {"error": f"출발일({dates['start']})이 과거입니다. 미래 날짜로 다시 요청해 주세요."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # raw_input에 원문 메시지도 함께 보존 — 파싱 캐시(30분)가 증발해도
+        # 마이페이지에서 계획을 다시 열 때 대화 첫 줄(사용자 요청)을 복원할 수 있게
         trip_request, plan = create_request_and_plan(
-            request.user, fields, cached.get("parsed")
+            request.user, fields, {
+                "original_message": cached.get("original_message", ""),
+                "parsed": cached.get("parsed"),
+            }
         )
         nationality = getattr(request.user, "nationality", None)
         async_result = run_full_pipeline.delay(run_id, fields, nationality, plan.id)

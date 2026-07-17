@@ -166,6 +166,27 @@ def plan_detail(request, plan_id):
              if plan.request.origin_iata and first_dest and first_dest.iata_code
              else None)
 
+    # ── 대화 복원 (스냅샷 재구성) ────────────────────────────────────────
+    # 대화 원본은 프론트 메모리에만 있어서 새로고침/재방문 시 사라진다.
+    # DB에 남아 있는 재료(원문 raw_input + 버전별 edit_request + allocation)로
+    # 대화 흐름을 재구성해 내려준다 — 마이페이지에서 계획을 다시 열 때 사용.
+    conversation = []
+    raw = plan.request.raw_input or {}
+    if raw.get("original_message"):
+        conversation.append({"role": "user", "text": raw["original_message"]})
+    versions = plan.request.plans.order_by("created_at")
+    for idx, p in enumerate(versions, start=1):
+        if p.edit_request:      # v2부터 존재 (그 버전을 만든 수정 요청)
+            conversation.append({"role": "user", "text": p.edit_request})
+        total = (p.allocation or {}).get("total_cost")
+        bot_text = ("계획서를 완성했습니다." if idx == 1
+                    else "요청을 반영해 계획서를 갱신했습니다.")
+        if total:
+            bot_text += f" 총 {total:,}원."
+        conversation.append({"role": "bot", "text": bot_text})
+        if p.id == plan.id:     # 지금 보고 있는 버전까지만 (이후 버전 대화는 제외)
+            break
+
     return Response({
         "plan_id": plan.id,
         "request_id": plan.request_id,
@@ -174,6 +195,7 @@ def plan_detail(request, plan_id):
         "narrative": plan.narrative,
         "payment": _payment_dict(payment),                # 숙소 결제
         "flight_payment": _payment_dict(flight_payment),  # 항공 결제
+        "conversation": conversation,                     # 복원된 대화 (위 재구성)
         "flight": {
             "airline": flight.airline,
             "price_krw": flight.price_krw,
@@ -417,7 +439,16 @@ def trip_delete(request, request_id):
     except TripRequest.DoesNotExist:
         return Response({"error": "여행 요청을 찾을 수 없습니다."},
                         status=status.HTTP_404_NOT_FOUND)
-    
+
+    # 확정된 계획은 삭제 불가 — 예약/결제로 이어질 수 있는 상태라서
+    # (미확정 draft만 정리 가능하게 한다는 정책. 결제 이력 보호는 아래 PROTECT가 이중 방어)
+    latest_plan = trip_request.plans.order_by("created_at").last()
+    if latest_plan and latest_plan.status == Plan.Status.CONFIRMED:
+        return Response(
+            {"error": "확정된 계획은 삭제할 수 없습니다."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
         trip_request.delete()   # CASCADE: destinations, plans, flights, hotels, days, items
     except ProtectedError:
