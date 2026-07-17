@@ -1,0 +1,43 @@
+# Loki 설정 — "로그의 Prometheus"
+#
+# 역할: Promtail이 밀어넣는 컨테이너 로그를 저장하고, Grafana에서
+# "worker 로그 중 'error' 포함된 줄" 같은 검색이 가능하게 한다.
+# (지금까지는 EC2에 SSH 접속해서 docker logs를 쳐야 했던 일)
+#
+# 단일 노드·파일시스템 저장의 최소 구성 — 우리 규모(EC2 1대)에 맞춤.
+
+auth_enabled: false      # 내부 네트워크 전용이라 인증 생략 (포트를 밖에 안 연다)
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1      # 복제 없음 (노드 1대)
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# 로그 보관 7일 — Prometheus 지표 보관과 맞춤 (작은 디스크 보호)
+limits_config:
+  retention_period: 168h
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
