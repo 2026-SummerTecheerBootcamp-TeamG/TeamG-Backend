@@ -28,7 +28,8 @@ from agents import trace
 
 # ask_claude를 안 쓰는 이유: ask_claude는 질문->답변 문자열 전용이라 tools 파라미터를 지원하지 않음
 # 툴 루프에는 원본 클라이언트가 필요함
-_client = anthropic.Anthropic()
+# max_retries=4: Anthropic 혼잡(529)/한도(429)를 SDK 지수 백오프로 흡수 (claude_client와 동일)
+_client = anthropic.Anthropic(max_retries=4)
 
 # 무한루프 방지
 MAX_TURNS = 8

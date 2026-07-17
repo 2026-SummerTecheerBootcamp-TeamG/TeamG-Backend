@@ -28,9 +28,32 @@ import time
 # AsyncResult: task_id로 Celery 결과 백엔드에서 상태/결과를 조회하는 클래스
 from celery.result import AsyncResult
 
+import anthropic
+
 from agents.tasks import run_orchestrator, run_full_pipeline
 from agents.trace import get_events, open_subscription
 from agents.parser import parse_intent, validate_slots
+
+
+def _parse_error_response(e):
+    """
+    파싱 실패 응답 조립 — 원인을 사용자가 알 수 있는 문구로.
+
+    Anthropic 서버 혼잡(529 Overloaded)이나 요청 한도(429)는 우리 서버
+    장애가 아니라 일시적 혼잡이므로, 503(Service Unavailable)과 함께
+    "잠시 후 재시도" 안내를 준다 (실사고 2026-07-16: 529가 사용자에게
+    "파싱 중 오류"로만 보였음). SDK 자동 재시도(max_retries=4)를 다
+    소진하고도 실패했을 때만 여기 도달한다.
+    """
+    if isinstance(e, anthropic.APIStatusError) and e.status_code in (429, 529):
+        return Response(
+            {"error": "지금 AI 응답이 밀려 있어요. 10초쯤 뒤에 다시 시도해 주세요."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(
+        {"error": "파싱 중 오류가 발생했습니다.", "detail": str(e)},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
 
 
 def _user_profile(user) -> dict:
@@ -114,10 +137,7 @@ def parse_request(request):
             status=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
     except Exception as e:
-        return Response(
-            {"error": "파싱 중 오류가 발생했습니다.", "detail": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _parse_error_response(e)
 
     # ── Step 4. 캐시에 저장 (재질문 흐름 대비) ───────────────────────────
     # parse/answer/ API에서 session_id로 꺼내서 원문과 병합할 수 있게
@@ -221,10 +241,7 @@ def parse_answer(request):
             status=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
     except Exception as e:
-        return Response(
-            {"error": "파싱 중 오류가 발생했습니다.", "detail": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _parse_error_response(e)
 
     # ── Step 4. 재파싱 결과 캐시 업데이트 ───────────────────────────────
     # 아직 missing_slots가 있으면 또 재질문할 수 있으니까 캐시 업데이트
@@ -413,10 +430,7 @@ def parse_correct(request, parse_id):
             status=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
     except Exception as e:
-        return Response(
-            {"error": "파싱 중 오류가 발생했습니다.", "detail": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _parse_error_response(e)
 
     # ── Step 4. 정정된 결과 캐시 저장 ───────────────────────────────────
     cache.set(f"parse:{parsed['parse_id']}", {
