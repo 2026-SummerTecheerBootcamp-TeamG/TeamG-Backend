@@ -31,3 +31,7 @@ jobs:
             # 위 up --build로 web이 재생성되어 IP가 바뀌면 nginx가 옛 IP를 물고 502를 내므로
             # 배포 마지막에 nginx를 재시작해 새 IP를 다시 찾게 한다 (2026-07-16 502 장애 재발 방지)
             docker compose -f docker-compose.prod.yml restart nginx
+            # 배포마다 --build가 남기는 옛 이미지/빌드 캐시 정리 (2026-07-17 디스크 풀 장애 재발 방지)
+            # 주의: --volumes는 절대 금지 — 인증서/모니터링 데이터가 볼륨에 있다
+            docker image prune -f
+            docker builder prune -f --keep-storage 2GB
