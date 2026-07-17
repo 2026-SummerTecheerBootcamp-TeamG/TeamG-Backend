@@ -1,0 +1,65 @@
+# 모니터링 스택 — 운영 compose와 "별도 파일"로 분리
+#
+# 분리한 이유:
+#   ① 배포 파이프라인(deploy.yml)이 건드리지 않음 — 모니터링 장애가 서비스
+#      배포를 막지 않고, 반대로 배포가 모니터링을 재시작시키지도 않는다
+#   ② 메모리가 부족하면 모니터링만 내릴 수 있다 (서비스는 무영향)
+#
+# 실행:  docker compose -f docker-compose.monitoring.yml up -d
+# 중지:  docker compose -f docker-compose.monitoring.yml down
+#
+# 기존 서비스와 통신하는 원리: 맨 아래 networks에서 운영 compose가 만든
+# 네트워크(teamg-backend_default)에 "외부 네트워크"로 합류한다.
+# → Prometheus가 web:8000/metrics를 내부에서 직접 긁을 수 있다.
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: teamg-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d    # 보관 7일 — 작은 EC2 디스크 보호
+    networks: [backend]
+    # 포트를 밖에 안 연다 — Grafana만 내부 네트워크로 접근 (보안)
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: teamg-grafana
+    ports:
+      - "3000:3000"                         # 대시보드 접속 문 (보안그룹에서 3000 허용 필요)
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      # 비밀번호는 .env에서 읽는다 (GRAFANA_ADMIN_PASSWORD 줄 추가 필요)
+      # ":-changeme" = 미설정 시 기본값 — 반드시 .env에 실제 값을 넣을 것
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
+    volumes:
+      - grafana-data:/var/lib/grafana       # 대시보드 설정이 재시작에도 유지되게
+    depends_on:
+      - prometheus
+    networks: [backend]
+
+  # 컨테이너별 리소스 지표 수집기 — 호스트의 도커 상태를 읽어야 해서
+  # 시스템 경로들을 읽기 전용으로 마운트한다 (cAdvisor 공식 권장 구성)
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: teamg-cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [backend]
+
+networks:
+  backend:
+    external: true                    # "이미 있는 네트워크에 합류" 선언
+    name: teamg-backend_default       # 운영 compose(폴더명 기반)가 만든 네트워크
+                                      # EC2에서 docker network ls로 이름 확인 가능
+
+volumes:
+  prometheus-data:
+  grafana-data:
