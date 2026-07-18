@@ -191,6 +191,11 @@ def plan_detail(request, plan_id):
         "plan_id": plan.id,
         "request_id": plan.request_id,
         "status": plan.status,
+        # 프론트가 days.length로 여행 기간(박수)을 추정하다 생긴 버그(Bug#96) 대응.
+        # days 배열은 귀국일이 빠진 "일정이 있는 날"만 담기 때문에 총 여행일수와 다름 —
+        # 실제 기간은 항상 이 날짜로 계산해야 함
+        "start_date": plan.request.start_date,
+        "end_date": plan.request.end_date,
         "allocation": plan.allocation,
         "narrative": plan.narrative,
         "payment": _payment_dict(payment),                # 숙소 결제
