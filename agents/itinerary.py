@@ -110,7 +110,7 @@ def _split_into_days(ordered: list[dict], num_days: int) -> list[list[dict]]:
 
 def _to_items(stops: list[dict], departure_time_iso: str | None) -> list[dict]:
     """하루의 장소들을 ERD ItineraryItem 형태로 변환
-    
+
     ERD와 이름을 맞춰두면 나중에 DB 저장이 단순해짐
     """
 
@@ -123,27 +123,55 @@ def _to_items(stops: list[dict], departure_time_iso: str | None) -> list[dict]:
                 (s["lat"], s["lng"]), (nxt["lat"], nxt["lng"]),
                 mode="transit", departure_time_iso=departure_time_iso,
             )       # 폴백 체인은 google_client가 처리
+        place_detail = {       # ERD의 place_detail JSON - 재검색 없이 표시용 저장
+            "rating": s.get("rating"),
+            "user_ratings": s.get("user_ratings"),
+            "address": s.get("address"),
+        }
+        if "airport" in (s.get("types") or []):
+            place_detail["category"] = "airport"   # 프론트에서 공항 항목 구분용
         items.append({
             "visit_order": i + 1,
             "place_name": s["name"],
             "lat": s["lat"],
             "lng": s["lng"],
-            "place_detail": {       # ERD의 place_detail JSON - 재검색 없이 표시용 저장
-                "rating": s.get("rating"),
-                "user_ratings": s.get("user_ratings"),
-                "address": s.get("address"),
-            },
+            "place_detail": place_detail,
             "travel_min_to_next": travel["duration_min"] if travel else None,
             "travel_mode": travel["mode"] if travel else None,
         })
     return items
 
 
-def _build_city_days(destination: dict, themes: list[str], plan_days: int, 
-                   day_offset: int, departure_time_iso: str | None) -> list[dict]:
+def _airport_stop(city_en: str, center: tuple[float, float] | None) -> dict | None:
+    """도시의 대표 공항 1곳을 장소 형태로 검색
+
+    도심 기준 반경 20km(기본값)로는 공항이 잘리는 도시가 많아(간사이/인천 등)
+    반경을 최대치(50km)로 넓혀서 검색함
+    """
+
+    lat, lng = center if center else (None, None)
+    for q in (f"{city_en} international airport", f"{city_en} 국제공항"):
+        try:
+            results = search_places(q, latitude=lat, longitude=lng,
+                                    radius_m=50000, max_results=3)
+        except Exception as e:
+            logger.warning("공항 검색 '%s' 실패: %s", q, e)
+            continue
+        for r in results:
+            if r.get("lat") is not None and r.get("lng") is not None:
+                return r
+    return None
+
+
+def _build_city_days(destination: dict, themes: list[str], plan_days: int,
+                   day_offset: int, departure_time_iso: str | None,
+                   include_arrival_airport: bool = False,
+                   include_departure_airport: bool = False) -> list[dict]:
     """도시 하나의 일정을 만듦
-    
+
     day_offset: 이 도시의 일정이 전체 여행의 며칠째부터 시작하는지
+    include_arrival_airport: 여행 전체의 첫 날 맨 앞에 도착 공항을 넣을지
+    include_departure_airport: 여행 전체의 마지막 날 맨 뒤에 출발(귀국) 공항을 넣을지
     """
     
     city = destination.get("city")
@@ -185,6 +213,17 @@ def _build_city_days(destination: dict, themes: list[str], plan_days: int,
         if i < len(top_foods):
             stops.append(top_foods[i])
         day_stops.append(_order_by_nearest(stops))  # 맛집이 끼어들었으니 그 날 동선을 재정렬
+
+    # 공항 부착: 동선 정렬 이후에 붙여야 함 (NN 정렬에 섞이면 공항이 하루 중간에 낄 수 있음)
+    if (include_arrival_airport or include_departure_airport) and day_stops:
+        airport = _airport_stop(city_en, center)
+        if airport:
+            if include_arrival_airport:
+                day_stops[0].insert(0, airport)
+            if include_departure_airport:
+                day_stops[-1].append(airport)
+        else:
+            logger.warning("%s 공항을 찾지 못해 공항 이동 일정을 생략합니다", city)
 
     # 날짜별 구성 2단계: 이동시간 부착 (_to_items 안의 Routes API 호출 = 일정 생성 최대 병목)
     # 11박이면 leg가 20개 이상 — 직렬로는 수십 초 걸리므로 날짜 단위로 병렬 호출
@@ -250,9 +289,8 @@ def build_day_plan(destinations: list[dict], themes: list[str] | None = None,
     Args:
         destinations: 파서 출력의 목적지 목록
         themes / start_date: 이전과 동일
-    
-    도시별 활동일수 = 그 도시의 nights
-    도시들을 순서대로 이어붙이면 마지막 날이 자연스럽게 계획에서 빠짐
+
+    도시별 활동일수 = 그 도시의 nights (마지막 도시는 귀국일만큼 +1)
     """
 
     if not destinations or not destinations[0].get("city"):
@@ -266,10 +304,17 @@ def build_day_plan(destinations: list[dict], themes: list[str] | None = None,
 
     day_plan = []
     day_offset = 0
-    for dest in destinations:
+    last_idx = len(destinations) - 1
+    for idx, dest in enumerate(destinations):
         city_days = max(1, dest.get("nights") or 1)
+        if idx == last_idx:
+            city_days += 1  # 전체 여행의 마지막 날(귀국일)을 마지막 도시 일정에 포함
         day_plan.extend(
-            _build_city_days(dest, themes, city_days, day_offset, departure_time_iso)
+            _build_city_days(
+                dest, themes, city_days, day_offset, departure_time_iso,
+                include_arrival_airport=(idx == 0),
+                include_departure_airport=(idx == last_idx),
+            )
         )
         day_offset += city_days
 
