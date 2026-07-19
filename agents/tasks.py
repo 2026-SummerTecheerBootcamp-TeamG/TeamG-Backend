@@ -5,6 +5,7 @@ agents 앱의 Celery 태스크 모음
 그래서 이 파일을 만들기만 하면 워커가 여기 태스크들을 자동 등록함
 """
 
+import re
 import time
 from datetime import date
 import asyncio
@@ -224,6 +225,8 @@ def run_local_edit(run_id, plan_id, edit_request):
     new_plan.narrative = narrate_day_plan(
         cities, new_plan.request.themes or [], new_day_plan
     )
+    # AI의 편집 답변을 버전에 저장 — 대화 복원 때 원문 그대로 되살리기 위해
+    new_plan.edit_summary = edited.get("summary", "")
     new_plan.save()
     trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
                   f"plan {plan_id} -> {new_plan.id}"
@@ -418,13 +421,56 @@ def run_flight_ticketing(run_id, plan_id, lead_passenger, email):
     }
 
 
+# 위치 의도 감지: "X 근처", "가까운 곳", "주변" 등
+_LOCATION_HINT = re.compile(r"(근처|가까|주변)")
+
+
+def _resolve_location_anchor(old_plan, dest, edit_request):
+    """
+    수정 요청의 위치 의도를 좌표 앵커로 변환.
+
+    실사고: "숙소를 마블마운틴 근처로" 요청이 재검색까지는 됐는데, 숙소 평가에
+    좌표 개념이 없어서 그리디 엔진이 그냥 최저가를 골랐다. 이 앵커 좌표로
+    후보마다 거리 가점을 주면 "가까운 곳" 조건이 점수에 실제로 반영된다.
+
+    반환: ((lat, lng), 앵커 설명) 또는 (None, None)
+    """
+    from agents.google_client import search_places
+
+    if not _LOCATION_HINT.search(edit_request):
+        return None, None
+
+    # ① "일정(장소들)과 가까운" → 이 계획 방문지들의 무게중심
+    if "일정" in edit_request or "장소" in edit_request:
+        coords = [(it.latitude, it.longitude)
+                  for day in old_plan.days.all()
+                  for it in day.items.all()
+                  if it.latitude is not None and it.longitude is not None]
+        if coords:
+            lat = sum(c[0] for c in coords) / len(coords)
+            lng = sum(c[1] for c in coords) / len(coords)
+            return (lat, lng), "일정 장소들의 중심"
+
+    # ② "마블마운틴 근처"처럼 특정 장소 언급 → 요청 문장 그대로 장소 검색
+    #    (Places 텍스트 검색은 자연어에 강해서 문장에서 장소를 알아서 찾아냄)
+    try:
+        city = dest.city_en or dest.city_name
+        for p in search_places(f"{city} {edit_request[:40]}", max_results=3):
+            if p.get("lat") is not None:
+                return (p["lat"], p["lng"]), p.get("name") or "요청 위치"
+    except Exception:
+        pass    # 앵커를 못 찾으면 가점 없이 진행 (기능 자체는 계속)
+    return None, None
+
+
 @shared_task(name="agents.run_budget_edit")
 def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
     """
-    예산영향 수정: 숙소만 재검색 → 기존 항공 고정 → 재배분 → 새 버전.
+    예산영향 수정: 요청과 관련된 쪽(항공/숙소)만 재검색 → 나머지 고정 → 재배분 → 새 버전.
 
-    수정 라우터 3갈래의 마지막 조각 (국소수정/재계획은 기구현).
-    예: "숙소를 더 좋은 걸로 바꿔줘" — 항공/일정은 그대로, 숙소와 예산 배분만 다시.
+    예: "숙소를 일정과 가까운 곳으로" → 숙소 재검색, 항공 고정
+        "아침에 출발하는 비행기로" → 항공 재검색, 숙소 고정
+    어느 쪽을 재검색할지는 Claude가 수정 요청을 읽고 도구 선택으로 결정한다 (A방식).
     """
     from trips.models import Plan
     from trips.services import save_budget_edited_version
@@ -449,39 +495,88 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         tr.total_budget = requested_budget
         tr.save(update_fields=["total_budget"])
 
-    # ── 1. 숙소 재검색 (A방식 — 수정 요청을 선호 조건으로 전달) ─────────
+    # ── 1. 재검색 (A방식) — 요청과 관련된 쪽(항공/숙소)만 Claude가 골라 수행 ──
+    # 실사고: "숙소를 가까운 곳으로 바꿔줘"가 아무것도 못 바꿨던 문제의 해법.
+    # 항공 요청도 같은 경로로 처리된다 ("아침 비행기로 바꿔줘" 등).
+    origin_iata = tr.origin_iata or "ICN"
     mission = (
-        f"숙소를 다시 검색합니다. 사용자의 수정 요청: \"{edit_request}\"\n"
+        f"기존 여행 계획의 일부를 다시 검색합니다. 사용자의 수정 요청: \"{edit_request}\"\n"
         f"- 도시: {dest.city_en or dest.city_name} / 국가코드: {dest.country_code or 'JP'}\n"
-        f"- 체크인: {tr.start_date} / 체크아웃: {tr.end_date} / 성인: {tr.adult}명\n"
-        f"절차: 객실 배분 → 숙소 검색 → 후보 평가(점수)까지 수행하세요. "
-        f"항공/예약 관련 도구는 사용하지 마세요. "
-        f"수정 요청의 선호(등급/위치/분위기 등)를 평가에 반영하세요. "
-        f"최종 답변은 후보 요약만 간단히."
+        f"- 왕복 구간: {origin_iata} → {dest.iata_code or '?'} / 일정: {tr.start_date} ~ {tr.end_date}\n"
+        f"- 성인: {tr.adult}명\n"
+        f"규칙:\n"
+        f"1) 요청이 '숙소' 변경이면: 객실 배분 → 숙소 검색 → 후보 평가만 수행\n"
+        f"2) 요청이 '항공' 변경이면: 항공 검색과 평가만 수행\n"
+        f"3) 요청과 관련 없는 쪽 도구와 예약/발권 도구는 사용하지 마세요\n"
+        f"4) 요청의 선호(위치/시간대/등급 등)를 평가에 반영하세요\n"
+        f"모든 검색이 끝나면 최종 답변은 '검색 완료' 한 문장만 쓰세요."
     )
     collected = {}
     asyncio.run(run_agent_loop(run_id, mission,
                                collected=collected, finish_trace=False))
-    hotel_options = collected.get("hotel_options", [])
-    trace.publish(run_id, "data", "orchestrator", "숙소 재검색 완료",
-                  f"후보 {len(hotel_options)}건")
+    new_flights = collected.get("flight_options", [])
+    new_hotels = collected.get("hotel_options", [])
+    trace.publish(run_id, "data", "orchestrator", "재검색 완료",
+                  f"항공 {len(new_flights)}건 / 숙소 {len(new_hotels)}건")
 
-    if not hotel_options:
-        trace.done(run_id, "예산영향 수정 중단: 숙소 후보 없음")
+    # ── 1.5 위치 가점: "X 근처/일정과 가까운" 요청을 점수에 실제로 반영 ──
+    # 가점 = 25점에서 km당 -5 (5km 밖은 0) — 결정론 보정이라 예산 엔진의
+    # "같은 입력 = 같은 결과" 원칙이 유지된다
+    anchor, anchor_name = (None, None)
+    if new_hotels:
+        from agents.google_client import haversine_km
+        anchor, anchor_name = _resolve_location_anchor(old_plan, dest, edit_request)
+        if anchor:
+            for h in new_hotels:
+                raw = h.get("raw") or {}
+                if raw.get("latitude") is not None and raw.get("longitude") is not None:
+                    dist = haversine_km(anchor, (raw["latitude"], raw["longitude"]))
+                    h["utility"] = (h.get("utility") or 50.0) + max(0.0, 25.0 - 5.0 * dist)
+                    raw["anchor_distance_km"] = round(dist, 1)   # 표시/검증용 기록
+            trace.publish(run_id, "rule", "budget", "위치 가점 적용",
+                          f"기준: {anchor_name} (0km +25점, km당 -5)")
+
+    if not new_flights and not new_hotels:
+        trace.done(run_id, "예산영향 수정 중단: 새 후보 없음")
         return {"run_id": run_id,
-                "error": "조건에 맞는 숙소 후보를 찾지 못했습니다. 조건을 바꿔 다시 시도해 주세요."}
+                "error": "요청과 관련된 새 후보를 찾지 못했습니다. 조건을 바꿔 다시 시도해 주세요."}
 
-    # ── 2. 재배분: 기존 선택 항공을 "고정 옵션 1개"로 투입 ──────────────
-    # 옵션이 1개면 그리디 엔진은 항공을 못 바꾸므로 자연스럽게 고정된다
+    # ── 2. 재배분: 재검색하지 않은 쪽은 기존 선택을 "고정 옵션 1개"로 투입 ──
+    # 옵션이 1개면 그리디 엔진은 그쪽을 못 바꾸므로 자연스럽게 고정된다
     old_flight = getattr(old_plan, "flight", None)
-    flight_options = []
-    if old_flight:
+    old_hotel = getattr(old_plan, "hotel", None)
+
+    if new_flights:
+        flight_options = new_flights
+    elif old_flight:
         flight_options = [{
             "label": old_flight.airline,
             "krw": old_flight.price_krw,
             "utility": float(old_flight.utility) if old_flight.utility is not None else None,
+            "utility_reasons": old_flight.utility_reasons,
             "raw": old_flight.slices,
         }]
+    else:
+        flight_options = []
+
+    if new_hotels:
+        hotel_options = new_hotels
+    elif old_hotel:
+        # 기존 숙소를 옵션 형태로 복원 — raw에 표시용 정보를 다시 담아
+        # 저장 단계(save_budget_edited_version)가 한 갈래 로직으로 처리하게 한다
+        hotel_options = [{
+            "label": old_hotel.liteapi_hotel_id,
+            "krw": old_hotel.price_krw,
+            "utility": float(old_hotel.utility) if old_hotel.utility is not None else None,
+            "raw": {
+                **(old_hotel.detail or {}),
+                "name": old_hotel.name, "star_rating": old_hotel.stars,
+                "latitude": old_hotel.latitude, "longitude": old_hotel.longitude,
+                "reasons": old_hotel.utility_reasons,
+            },
+        }]
+    else:
+        hotel_options = []
 
     days = (tr.end_date - tr.start_date).days + 1
     travelers = tr.adult + tr.kid
@@ -507,8 +602,24 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         language_for_nationality(getattr(tr.user, "nationality", None)),
     )
 
-    # ── 4. 새 버전 저장 (배분/숙소 새것, 항공/일정 원본 유지) ───────────
+    # ── 4. 새 버전 저장 (재검색된 쪽 새것, 나머지 원본 유지) ────────────
     save_budget_edited_version(old_plan, new_plan, allocation, explanation)
+
+    # 무엇을 바꿨는지 한 줄 요약 — 챗 응답과 대화 복원(edit_summary) 양쪽에 사용
+    # 말투 원칙(피드백): 사용자 언어로 짧게. "가점/재배분/후보" 같은 시스템 용어 금지
+    if new_flights and new_hotels:
+        changed_txt = "항공편과 숙소를"
+    elif new_flights:
+        changed_txt = "항공편을"
+    else:
+        changed_txt = "숙소를"
+    if anchor_name:
+        summary_text = f"{anchor_name}에서 가까운 곳으로 {changed_txt} 다시 잡았습니다."
+    else:
+        summary_text = f"요청에 맞춰 {changed_txt} 다시 잡았습니다."
+    new_plan.edit_summary = summary_text
+    new_plan.save(update_fields=["edit_summary"])
+
     trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
                   f"plan {old_plan_id} -> {new_plan.id}")
     trace.done(run_id, "예산영향 수정 완료")
@@ -519,4 +630,6 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         "new_plan_id": new_plan.id,
         "allocation": allocation,
         "explanation": explanation,
+        # FE 챗 말풍선에 표시되는 문구 (국소수정의 summary와 같은 계약)
+        "summary": summary_text,
     }

@@ -179,8 +179,13 @@ def plan_detail(request, plan_id):
         if p.edit_request:      # v2부터 존재 (그 버전을 만든 수정 요청)
             conversation.append({"role": "user", "text": p.edit_request})
         total = (p.allocation or {}).get("total_cost")
-        bot_text = ("계획서를 완성했습니다." if idx == 1
-                    else "요청을 반영해 계획서를 갱신했습니다.")
+        # 봇 답변: 저장된 AI 요약(edit_summary)이 있으면 원문 그대로 —
+        # "2일차에 ...을 옮겼습니다" 같은 실제 답변이 복원된다.
+        # 없으면(edit_summary 도입 전 버전) 일반 문구로 재구성
+        if idx == 1:
+            bot_text = "계획서를 완성했습니다."
+        else:
+            bot_text = p.edit_summary or "요청을 반영해 계획서를 갱신했습니다."
         if total:
             bot_text += f" 총 {total:,}원."
         conversation.append({"role": "bot", "text": bot_text})
