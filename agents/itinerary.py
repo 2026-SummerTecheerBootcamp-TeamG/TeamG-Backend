@@ -234,6 +234,11 @@ def collect_edit_candidates(city_en: str, country_code: str | None,
                 f"{city_en} 관광 명소"]
 
     candidates = _collect_places(queries, seen, center, per_query=per_query)
+    # 숙소(호텔)는 방문 장소가 아니므로 제외 — 실사고: 수정 요청 문장을 검색어로
+    # 쓰다 보니 호텔이 후보로 들어와 편집기가 일정에 숙소를 "제안"하는 혼선 발생.
+    # 숙소 변경은 예산영향 라우트(재검색+재배분)의 관할이다.
+    candidates = [c for c in candidates
+                  if "lodging" not in (c.get("types") or [])]
     # 프롬프트 비대 방지: 인기도 상위 12곳까지만
     return _pick_top(candidates, 12)
 
