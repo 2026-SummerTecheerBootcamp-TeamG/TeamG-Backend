@@ -138,6 +138,9 @@ class Plan(models.Model):
     allocation = models.JSONField(null=True, blank=True)        # 예산 배분 스냅샷
     narrative = models.TextField(null=True, blank=True)         # Claude가 쓴 일정 설명문
     edit_request = models.TextField(null=True, blank=True)      # 이 버전을 만든 수정 요청 원문
+    # 그 수정에 대한 AI의 답변 요약 ("2일차에 ...을 옮겼습니다" 등)
+    # — 대화 복원 때 봇 답변을 원문 그대로 되살리기 위해 저장 (없으면 일반 문구로 재구성)
+    edit_summary = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

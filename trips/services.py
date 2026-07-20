@@ -423,11 +423,13 @@ def save_booking(plan, guest_first, guest_last, guest_email, booking_data,
 
 def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
     """
-    예산영향 수정의 새 버전 완성: 배분/숙소는 새것, 항공/일정은 원본 유지.
+    예산영향 수정의 새 버전 완성: 항공/숙소는 재배분 선택(selection)에서, 일정은 원본 복사.
 
-    왜 항공은 복사인가: 예산영향 수정(예: "숙소 업그레이드")에서 항공은
-    이미 확정된 선택이므로 고정 — 재배분 엔진에도 그 1개만 옵션으로 넣었다.
-    왜 일정은 복사인가: 숙소가 바뀌어도 방문지 동선은 그대로 (일정 변경은 국소수정 관할).
+    항공도 selection에서 저장하는 이유: 이제 항공 재검색도 지원되므로
+    (예: "아침 비행기로 바꿔줘") 어느 쪽이 바뀌었든 selection이 진실이다.
+    재검색하지 않은 쪽은 태스크가 "기존 선택을 유일 옵션"으로 투입했으므로
+    selection에 기존 값이 그대로 담겨 온다 — 저장 로직은 한 갈래로 통일.
+    왜 일정은 복사인가: 숙소/항공이 바뀌어도 방문지 동선은 그대로 (일정 변경은 국소수정 관할).
     """
     selection = allocation.get("selection") or {}
 
@@ -438,17 +440,21 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
         new_plan.status = Plan.Status.DRAFT
         new_plan.save()
 
-        # 항공: 원본 선택 그대로 복사 (고정)
-        old_flight = getattr(old_plan, "flight", None)
-        if old_flight:
+        # 항공: 재배분이 고른 선택 (재검색 없었으면 = 기존 항공이 그대로 담김)
+        sel_flight = selection.get("flight")
+        if sel_flight:
             Flight.objects.create(
-                plan=new_plan, airline=old_flight.airline,
-                price_krw=old_flight.price_krw, price_original=old_flight.price_original,
-                currency=old_flight.currency, utility=old_flight.utility,
-                utility_reasons=old_flight.utility_reasons, slices=old_flight.slices,
+                plan=new_plan,
+                airline=sel_flight.get("label") or "?",
+                price_krw=sel_flight.get("krw") or 0,
+                price_original=sel_flight.get("krw") or 0,
+                currency="KRW",
+                utility=sel_flight.get("utility"),
+                utility_reasons=sel_flight.get("utility_reasons"),
+                slices=sel_flight.get("raw"),
             )
 
-        # 숙소: 재배분이 고른 새 선택
+        # 숙소: 재배분이 고른 선택
         sel_hotel = selection.get("hotel")
         if sel_hotel:
             raw = sel_hotel.get("raw") or {}
