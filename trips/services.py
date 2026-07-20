@@ -77,6 +77,49 @@ def create_request_and_plan(user, fields, raw_parsed=None):
     return trip_request, plan
 
 
+def _diet_candidates(flight_options, hotel_options, top_n=8):
+    """
+    검색 후보를 비교 UI용 스냅샷으로 다이어트 (Plan.candidates에 저장)
+
+    왜 다이어트: 원본 후보(raw)에는 슬라이스 전체 등 부피 큰 데이터가 섞여 있는데
+    비교·재선택에 필요한 필드는 소수다. 배분 엔진/저장 로직이 기대하는
+    {"label","krw","utility","raw"} 형태는 유지 — 이 스냅샷을 그대로
+    allocate_budget에 다시 넣어 "재검색 없는 교체 선택"이 가능하게 한다.
+    정렬: 만족도(utility) 높은 순 = 추천순
+    """
+
+    def diet_flight(o):
+        raw = o.get("raw") or {}
+        return {
+            "label": o.get("label"), "krw": o.get("krw"),
+            "utility": o.get("utility"),
+            "utility_reasons": o.get("utility_reasons"),
+            "raw": {k: raw.get(k) for k in
+                    ("departure_time", "arrival_time", "duration_min",
+                     "stops", "expires_at")},
+        }
+
+    def diet_hotel(o):
+        raw = o.get("raw") or {}
+        return {
+            "label": o.get("label"), "krw": o.get("krw"),
+            "utility": o.get("utility"),
+            "raw": {k: raw.get(k) for k in
+                    ("name", "star_rating", "latitude", "longitude",
+                     "reasons", "address")},
+        }
+
+    by_utility = lambda o: o.get("utility") or 0
+    priced_f = [o for o in flight_options if o.get("krw")]
+    priced_h = [o for o in hotel_options if o.get("krw")]
+    return {
+        "flights": [diet_flight(o) for o in
+                    sorted(priced_f, key=by_utility, reverse=True)[:top_n]],
+        "hotels": [diet_hotel(o) for o in
+                   sorted(priced_h, key=by_utility, reverse=True)[:top_n]],
+    }
+
+
 def save_pipeline_result(plan_id, result):
     """
     파이프라인 결과 dict를 DB에 채움
@@ -89,8 +132,10 @@ def save_pipeline_result(plan_id, result):
     selection = allocation.get("selection") or {}
 
     with transaction.atomic():
-        # Plan 본체: 배분 스냅샷 + 내러티브 + 상태 전환
+        # Plan 본체: 배분 스냅샷 + 후보 스냅샷(비교 UI용) + 내러티브 + 상태 전환
         plan.allocation = allocation
+        plan.candidates = _diet_candidates(
+            result.get("flight_options") or [], result.get("hotel_options") or [])
         plan.narrative = result.get("narrative")
         plan.status = Plan.Status.DRAFT
         plan.save()
@@ -228,6 +273,7 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
             request=old_plan.request,
             status=Plan.Status.DRAFT,
             allocation=old_plan.allocation,     # 국소수정 = 예산 불변이므로 복사
+            candidates=old_plan.candidates,     # 후보 스냅샷도 계승 (비교 UI 유지)
             narrative=old_plan.narrative,       # 설명문 재생성은 후속
             edit_request=edit_request,
         )
@@ -435,6 +481,8 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
 
     with transaction.atomic():
         new_plan.allocation = allocation
+        # 후보 스냅샷 계승 — 새 버전에서도 계속 비교·재선택할 수 있게
+        new_plan.candidates = old_plan.candidates
         # 배분 설명은 allocation과 함께 result로 반환되고, 일정 설명(narrative)은 불변
         new_plan.narrative = old_plan.narrative
         new_plan.status = Plan.Status.DRAFT

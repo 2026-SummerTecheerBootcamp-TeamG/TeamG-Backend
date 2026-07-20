@@ -139,6 +139,10 @@ class Plan(models.Model):
         default=Status.PROCESSING,
     )
     allocation = models.JSONField(null=True, blank=True)        # 예산 배분 스냅샷
+    # 검색 당시의 항공/숙소 후보 스냅샷 {"flights": [...], "hotels": [...]} (각 상위 8개, 다이어트본)
+    # 멘토 피드백 "서비스 안에서 여러 개 비교·선택" 대응 — 원래 후보는 배분 후 버려져서
+    # 비교 UI를 만들 수 없었다. 가격은 검색 시점 기준 (재검색 없이 교체 선택에 사용)
+    candidates = models.JSONField(null=True, blank=True)
     narrative = models.TextField(null=True, blank=True)         # Claude가 쓴 일정 설명문
     edit_request = models.TextField(null=True, blank=True)      # 이 버전을 만든 수정 요청 원문
     # 그 수정에 대한 AI의 답변 요약 ("2일차에 ...을 옮겼습니다" 등)
