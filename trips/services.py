@@ -184,8 +184,9 @@ def save_pipeline_result(plan_id, result):
                 city_name=day.get("city"),
                 date=start_date + timedelta(days=day_number - 1),
             )
-            for item in day.get("items") or []:
-                ItineraryItem.objects.create(
+            # bulk_create: 장소별 INSERT를 하루치 1번으로 묶음 (11박 여행이면 30회+ -> 11회)
+            ItineraryItem.objects.bulk_create([
+                ItineraryItem(
                     day=day_row,
                     visit_order=item.get("visit_order"),
                     place_name=item.get("place_name") or "?",
@@ -195,6 +196,8 @@ def save_pipeline_result(plan_id, result):
                     travel_min_to_next=item.get("travel_min_to_next"),
                     travel_mode=item.get("travel_mode"),
                 )
+                for item in day.get("items") or []
+            ])
             
     return plan
 
@@ -205,6 +208,8 @@ def load_day_plan(plan):
     (편집기 입력 + 재조립 원본 두 용도)
     """
     
+    # prefetch_related("items"): 날짜별로 items 쿼리를 따로 날리던 N+1을
+    # 2쿼리(days 1 + items 1)로 줄인다 — 결과 데이터는 완전히 동일
     return [
         {
             "day": day.day_number,
@@ -218,10 +223,10 @@ def load_day_plan(plan):
                     "travel_min_to_next": item.travel_min_to_next,
                     "travel_mode": item.travel_mode,
                 }
-                for item in day.items.all()
+                for item in day.items.all()     # prefetch 캐시 사용 (추가 쿼리 0)
             ],
         }
-        for day in plan.days.all()
+        for day in plan.days.prefetch_related("items")
     ]
 
 
@@ -321,17 +326,20 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 city_name=city_by_day.get(day_number),
                 date=start_date + timedelta(days=day_number - 1),
             )
-            for order, name in enumerate(valid_names, start=1):
-                src = item_by_name[name]
-                ItineraryItem.objects.create(
+            # bulk_create: 장소별 INSERT를 하루치 1번으로 묶음 (저장 내용은 동일)
+            ItineraryItem.objects.bulk_create([
+                ItineraryItem(
                     day=day_row, visit_order=order,
-                    place_name=src["place_name"],
-                    latitude=src["lat"], longitude=src["lng"],
-                    place_detail=src["place_detail"],
+                    place_name=item_by_name[name]["place_name"],
+                    latitude=item_by_name[name]["lat"],
+                    longitude=item_by_name[name]["lng"],
+                    place_detail=item_by_name[name]["place_detail"],
                     # 변경된 날은 동선이 달라져 기존 이동시간이 무의미
-                    travel_min_to_next=src["travel_min_to_next"] if unchanged else None,
-                    travel_mode=src["travel_mode"] if unchanged else None,
+                    travel_min_to_next=item_by_name[name]["travel_min_to_next"] if unchanged else None,
+                    travel_mode=item_by_name[name]["travel_mode"] if unchanged else None,
                 )
+                for order, name in enumerate(valid_names, start=1)
+            ])
 
     return new_plan, dropped
 
@@ -523,13 +531,14 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
             )
 
         # 일정: 원본 행 통째 복사 (이동시간 포함 — 내용 동일하므로 전부 유효)
-        for day in old_plan.days.all():
+        # prefetch로 읽기 N+1 제거 + bulk_create로 쓰기 INSERT 묶음 (내용 동일)
+        for day in old_plan.days.prefetch_related("items"):
             day_row = ItineraryDay.objects.create(
                 plan=new_plan, day_number=day.day_number,
                 city_name=day.city_name, date=day.date,
             )
-            for item in day.items.all():
-                ItineraryItem.objects.create(
+            ItineraryItem.objects.bulk_create([
+                ItineraryItem(
                     day=day_row, visit_order=item.visit_order,
                     place_name=item.place_name,
                     latitude=item.latitude, longitude=item.longitude,
@@ -539,5 +548,7 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
                     travel_min_to_next=item.travel_min_to_next,
                     travel_mode=item.travel_mode,
                 )
+                for item in day.items.all()
+            ])
 
     return new_plan
