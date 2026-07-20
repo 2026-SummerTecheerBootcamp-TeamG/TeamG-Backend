@@ -281,6 +281,8 @@ def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
     dates = fields.get("dates") or {}
     if not dates.get("start") or not dates.get("end"):
         trace.done(run_id, "재계획 중단: 날짜 확인 불가")
+        # placeholder 새 버전 정리 — '생성 중' 좀비 방지 (예산영향과 동일 원칙)
+        Plan.objects.filter(id=new_plan_id).delete()
         return {
             "run_id": run_id,
             "error": "수정 요청을 반영하면 날짜를 확정할 수 없습니다. "
@@ -290,6 +292,7 @@ def run_replan(run_id, old_plan_id, new_plan_id, edit_request):
     # 파서가 "9월 5일"의 연도를 과거로 찍음 → 항공/숙소 모두 빈손)
     if dates["start"] < date.today().isoformat():
         trace.done(run_id, f"재계획 중단: 과거 날짜 ({dates['start']})")
+        Plan.objects.filter(id=new_plan_id).delete()
         return {
             "run_id": run_id,
             "error": f"출발일({dates['start']})이 과거로 해석됐습니다. "
@@ -495,6 +498,15 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         tr.total_budget = requested_budget
         tr.save(update_fields=["total_budget"])
 
+    # ── 0.5 예산만 바꾸는 요청이면 재검색 자체가 불필요 ──────────────────
+    # 실사고: "예산을 310만원으로 조정할게" → 검색할 것이 없어 Claude가 툴을
+    # 안 부르고 후보 0건 → 실패 → placeholder 플랜이 '생성 중' 좀비로 남고
+    # 화면에서 계획이 증발. 예산만 변경이면 기존 항공/숙소를 고정한 채
+    # 새 예산으로 재배분만 한다 (활동비 등급이 예산에 맞춰 다시 정해짐).
+    wants_hotel = re.search(r"(숙소|호텔)", edit_request)
+    wants_flight = re.search(r"(항공|비행기|항공편|항공권)", edit_request)
+    budget_only = requested_budget is not None and not wants_hotel and not wants_flight
+
     # ── 1. 재검색 (A방식) — 요청과 관련된 쪽(항공/숙소)만 Claude가 골라 수행 ──
     # 실사고: "숙소를 가까운 곳으로 바꿔줘"가 아무것도 못 바꿨던 문제의 해법.
     # 항공 요청도 같은 경로로 처리된다 ("아침 비행기로 바꿔줘" 등).
@@ -511,13 +523,17 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         f"4) 요청의 선호(위치/시간대/등급 등)를 평가에 반영하세요\n"
         f"모든 검색이 끝나면 최종 답변은 '검색 완료' 한 문장만 쓰세요."
     )
-    collected = {}
-    asyncio.run(run_agent_loop(run_id, mission,
-                               collected=collected, finish_trace=False))
-    new_flights = collected.get("flight_options", [])
-    new_hotels = collected.get("hotel_options", [])
-    trace.publish(run_id, "data", "orchestrator", "재검색 완료",
-                  f"항공 {len(new_flights)}건 / 숙소 {len(new_hotels)}건")
+    if budget_only:
+        trace.publish(run_id, "rule", "budget", "예산만 변경 — 재검색 없이 재배분")
+        new_flights, new_hotels = [], []
+    else:
+        collected = {}
+        asyncio.run(run_agent_loop(run_id, mission,
+                                   collected=collected, finish_trace=False))
+        new_flights = collected.get("flight_options", [])
+        new_hotels = collected.get("hotel_options", [])
+        trace.publish(run_id, "data", "orchestrator", "재검색 완료",
+                      f"항공 {len(new_flights)}건 / 숙소 {len(new_hotels)}건")
 
     # ── 1.5 위치 가점: "X 근처/일정과 가까운" 요청을 점수에 실제로 반영 ──
     # 가점 = 25점에서 km당 -5 (5km 밖은 0) — 결정론 보정이라 예산 엔진의
@@ -536,8 +552,10 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
             trace.publish(run_id, "rule", "budget", "위치 가점 적용",
                           f"기준: {anchor_name} (0km +25점, km당 -5)")
 
-    if not new_flights and not new_hotels:
+    if not budget_only and not new_flights and not new_hotels:
         trace.done(run_id, "예산영향 수정 중단: 새 후보 없음")
+        # placeholder 새 버전을 지운다 — 안 지우면 '생성 중' 좀비로 영원히 남음 (실사고)
+        new_plan.delete()
         return {"run_id": run_id,
                 "error": "요청과 관련된 새 후보를 찾지 못했습니다. 조건을 바꿔 다시 시도해 주세요."}
 
@@ -613,7 +631,9 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         changed_txt = "항공편을"
     else:
         changed_txt = "숙소를"
-    if anchor_name:
+    if budget_only:
+        summary_text = f"예산을 {requested_budget:,}원으로 조정해 다시 배분했습니다."
+    elif anchor_name:
         summary_text = f"{anchor_name}에서 가까운 곳으로 {changed_txt} 다시 잡았습니다."
     else:
         summary_text = f"요청에 맞춰 {changed_txt} 다시 잡았습니다."
