@@ -262,24 +262,35 @@ def collect_edit_candidates(city_en: str, country_code: str | None,
     # seen을 기존 일정 이름으로 시작 -> 이미 일정에 있는 곳은 후보에서 제외
     seen = set(exclude_names)
 
+    def _drop_lodging(places: list[dict]) -> list[dict]:
+        # 숙소(호텔)는 방문 장소가 아니므로 제외 — 실사고: 수정 요청 문장을 검색어로
+        # 쓰다 보니 호텔이 후보로 들어와 편집기가 일정에 숙소를 "제안"하는 혼선 발생.
+        # 숙소 변경은 예산영향 라우트(재검색+재배분)의 관할이다.
+        return [c for c in places if "lodging" not in (c.get("types") or [])]
+
     # 수정 요청 문장 자체를 첫 검색어로 활용 — Places 텍스트 검색은 자연어에
     # 강해서 "특별한 저녁" 같은 뉘앙스를 반영한 결과를 준다.
-    # 뒤의 고정 쿼리들은 안전망 (요청이 검색어로 부적합해도 후보가 비지 않게)
-    queries = []
+    # ⭐ 이 결과는 사용자 의도의 직접 반영이므로 상위 3곳을 "보호 슬롯"으로
+    # 무조건 포함한다 (인기도 컷 면제). 실사고: "깃허브 본사 추가해줘" —
+    # 검색은 정확히 찾았는데(리뷰 293) 관광 명소들의 인기도 점수에 밀려
+    # top12에서 탈락 → 편집기가 "목록에 없다"며 거부. 순서는 Places의
+    # 관련도 순 그대로 쓴다 (요청과 가장 닮은 결과가 앞에 옴).
     req = (edit_request or "").strip()
+    req_results = []
     if req:
-        queries.append(f"{city_en} {req[:40]}")
-    queries += [f"{city_en} 맛집", f"best restaurants in {city_en}",
-                f"{city_en} 관광 명소"]
+        req_results = _drop_lodging(
+            _collect_places([f"{city_en} {req[:40]}"], seen, center, per_query=per_query)
+        )
+    protected, rest = req_results[:3], req_results[3:]
 
-    candidates = _collect_places(queries, seen, center, per_query=per_query)
-    # 숙소(호텔)는 방문 장소가 아니므로 제외 — 실사고: 수정 요청 문장을 검색어로
-    # 쓰다 보니 호텔이 후보로 들어와 편집기가 일정에 숙소를 "제안"하는 혼선 발생.
-    # 숙소 변경은 예산영향 라우트(재검색+재배분)의 관할이다.
-    candidates = [c for c in candidates
-                  if "lodging" not in (c.get("types") or [])]
-    # 프롬프트 비대 방지: 인기도 상위 12곳까지만
-    return _pick_top(candidates, 12)
+    # 고정 쿼리들은 안전망 (요청이 검색어로 부적합해도 후보가 비지 않게).
+    # 요청 쿼리의 4위 이하(rest)도 여기 합류해 인기도 경쟁으로 살아남을 수 있다
+    queries = [f"{city_en} 맛집", f"best restaurants in {city_en}",
+               f"{city_en} 관광 명소"]
+    generic = _drop_lodging(_collect_places(queries, seen, center, per_query=per_query)) + rest
+
+    # 프롬프트 비대 방지: 보호 슬롯 + 인기도 상위로 총 12곳까지만
+    return protected + _pick_top(generic, 12 - len(protected))
 
 
 def build_day_plan(destinations: list[dict], themes: list[str] | None = None,
