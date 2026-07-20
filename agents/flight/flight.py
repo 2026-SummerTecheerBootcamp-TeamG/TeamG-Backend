@@ -37,7 +37,8 @@ def score_utility(is_direct: bool, departure_hour: int, arrival_hour: int) -> fl
 def make_candidate(airline: str, krw: int, is_direct: bool,
                    departure_hour: int, arrival_hour: int,
                    departure_time: str | None = None, arrival_time: str | None = None,
-                   duration_min: int | None = None, stops: int = 0) -> dict:
+                   duration_min: int | None = None, stops: int = 0,
+                   departure_token: str | None = None) -> dict:
     # 항공권 정보를 예산 에이전트 사용할 형식으로 변환
     return {
         "label": airline,
@@ -50,15 +51,21 @@ def make_candidate(airline: str, krw: int, is_direct: bool,
             "arrival_time": arrival_time,
             "duration_min": duration_min,
             "stops": stops,
+            # 이 후보의 오는 편을 조회할 때 필요한 토큰 (SerpApi google_flights)
+            "departure_token": departure_token,
         },
     }
 
 
 def search_flights(departure_id: str, arrival_id: str,
                    outbound_date: str, return_date: str,
-                   adults: int = 1) -> list[dict]:
+                   adults: int = 1, departure_token: str | None = None,
+                   timeout: int = 60) -> list[dict]:
     """
     SerpApi(Google Flights)로 왕복 항공권을 검색한다.
+
+    departure_token: 가는 편 후보에 딸려오는 토큰. 넘기면 그 가는 편에 대응하는
+    "오는 편" 후보가 flights[] 자리에 대신 반환된다 (SerpApi 왕복 조회 규칙).
     """
     params = {
         "engine": "google_flights",
@@ -71,8 +78,10 @@ def search_flights(departure_id: str, arrival_id: str,
         "adults": adults,
         "api_key": os.environ.get("SERPAPI_KEY"),
     }
+    if departure_token:
+        params["departure_token"] = departure_token
 
-    response = requests.get(SERPAPI_URL, params=params, timeout=60)
+    response = requests.get(SERPAPI_URL, params=params, timeout=timeout)
     response.raise_for_status()
     data = response.json()
 
@@ -110,7 +119,37 @@ def parse_flight(raw_flight: dict) -> dict:
         arrival_time=arrival_time,
         duration_min=raw_flight.get("total_duration"),
         stops=len(flights) - 1,
+        departure_token=raw_flight.get("departure_token"),
     )
+
+
+def get_return_leg_times(departure_token: str, departure_id: str, arrival_id: str,
+                         outbound_date: str, return_date: str,
+                         adults: int = 1, timeout: int = 12) -> dict | None:
+    """
+    선택된 가는 편(departure_token)에 대응하는 실제 오는 편 시각을 조회한다.
+
+    SerpApi에 departure_token을 넣어 재조회하면 flights[]가 오는 편(귀국편)으로
+    바뀐다 (실측 확인됨). 여러 후보 중 최저가 1건을 대표로 사용한다.
+    실패/빈 결과는 None — 호출부가 기본 일정 윈도우로 조용히 폴백한다.
+
+    timeout을 기본 검색(60초)보다 훨씬 짧게 잡는 이유: 이건 있으면 좋은 부가
+    정보라 실패해도 파이프라인은 계속 진행된다. 느린 응답을 60초까지 기다리면
+    그 시간이 고스란히 전체 파이프라인 지연에 더해져 프론트 폴링 타임아웃
+    (120초)을 넘기게 만든 원인이었다.
+    """
+    results = search_flights(departure_id, arrival_id, outbound_date, return_date,
+                             adults, departure_token=departure_token, timeout=timeout)
+    if not results:
+        return None
+    cheapest = min(results, key=lambda f: f.get("price", float("inf")))
+    flights = cheapest.get("flights")
+    if not flights:
+        return None
+    return {
+        "return_departure_time": flights[0]["departure_airport"]["time"],
+        "return_arrival_time": flights[-1]["arrival_airport"]["time"],
+    }
 
 
 def get_flight_candidates(departure_id: str, arrival_id: str,

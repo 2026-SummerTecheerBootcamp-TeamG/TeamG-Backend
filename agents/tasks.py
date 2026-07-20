@@ -5,6 +5,7 @@ agents 앱의 Celery 태스크 모음
 그래서 이 파일을 만들기만 하면 워커가 여기 태스크들을 자동 등록함
 """
 
+import logging
 import re
 import time
 from datetime import date
@@ -22,6 +23,8 @@ from agents.budget_explain import explain_allocation, language_for_nationality
 from agents.itinerary import build_day_plan
 from agents.itinerary_narrate import narrate_day_plan
 from agents.orchestrator import run_agent_loop
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task(name="agents.trace_demo")
@@ -121,8 +124,35 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
     )
     trace.publish(run_id, "rule", "budget", "예산 배분 완료",
                   str(allocation.get("status", "")))
-    
-    # 3+4. 배분 설명 (LLM) ∥ 일정 + 내러티브
+
+    # 2.5 선택된 항공편의 실제 시각 확보 (일정 생성이 항공편 시각을 반영하도록)
+    # 가는 편 도착시각은 이미 selection에 있음. 오는 편(귀국편) 출발시각은
+    # 별도 SerpApi 재조회(departure_token)가 필요 — 실패해도 파이프라인은 계속
+    # 진행하고, 일정 생성은 기본 시간대(09:00~21:00)로 조용히 폴백한다.
+    #
+    # 이 조회는 아래 3+4 병렬 구간(배분 설명 LLM) 안에서 함께 돌린다 — 원래는
+    # 병렬 구간 "앞"에서 순차로 기다렸었는데, SerpApi 재조회가 수초~수십초 걸릴
+    # 수 있어 그만큼이 고스란히 전체 파이프라인 시간에 더해져 프론트 폴링
+    # 타임아웃(120초, usePlan.ts POLL_TIMEOUT)을 넘기는 원인이 됐다(실사고).
+    sel_flight = (allocation.get("selection") or {}).get("flight")
+    flight_arrival_time = None
+    return_leg_args = None
+    if sel_flight:
+        flight_raw = sel_flight.get("raw") or {}
+        flight_arrival_time = flight_raw.get("arrival_time")
+        token = flight_raw.get("departure_token")
+        if token:
+            dest0 = fields["destinations"][0]
+            return_leg_args = dict(
+                departure_token=token,
+                departure_id=origin.get("iata") or "ICN",
+                arrival_id=dest0.get("iata"),
+                outbound_date=fields["dates"]["start"],
+                return_date=fields["dates"]["end"],
+                adults=adults,
+            )
+
+    # 3+4. 귀국편 시각 조회 ∥ 배분 설명 (LLM) → 일정 + 내러티브
     # 설명 생성은 allocation만 있으면 되고 일정과는 서로 독립 →
     # 스레드로 띄워두고 그동안 일정을 만들면 설명 LLM 시간(~8초)이 통째로 숨는다
     request_summary = {
@@ -133,15 +163,33 @@ def run_full_pipeline(run_id, fields, nationality=None, plan_id=None):
         "총예산_KRW": fields["budget"],
     }
     trace.publish(run_id, "llm", "claude", "배분 설명 생성 (일정 구성과 병렬)")
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         explain_future = pool.submit(
             explain_allocation, request_summary, allocation,
             language_for_nationality(nationality),
         )
+        return_leg_future = None
+        if return_leg_args:
+            from agents.flight.flight import get_return_leg_times
+            return_leg_future = pool.submit(get_return_leg_times, **return_leg_args)
+
+        flight_departure_time = None
+        if return_leg_future:
+            try:
+                return_leg = return_leg_future.result()
+                if return_leg:
+                    flight_raw.update(return_leg)
+                    sel_flight["raw"] = flight_raw
+                    flight_departure_time = return_leg["return_departure_time"]
+                    trace.publish(run_id, "api", "google", "귀국편 시각 조회 완료")
+            except Exception as e:
+                logger.warning("귀국편 시각 조회 실패 (기본 일정 윈도우로 진행): %s", e)
 
         trace.publish(run_id, "api", "google", "일정 장소 수집/동선 계산")
         plan_data = build_day_plan(
-            fields["destinations"], themes, fields["dates"]["start"]
+            fields["destinations"], themes, fields["dates"]["start"],
+            flight_arrival_time=flight_arrival_time,
+            flight_departure_time=flight_departure_time,
         )
         trace.publish(run_id, "llm", "claude", "일정 내러티브 생성")
         narrative = narrate_day_plan(

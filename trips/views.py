@@ -265,6 +265,9 @@ def plan_detail(request, plan_id):
             "arrival_time": (flight.slices or {}).get("arrival_time"),
             "duration_min": (flight.slices or {}).get("duration_min"),
             "stops": (flight.slices or {}).get("stops"),
+            # 오는 편(귀국편) 실제 시각 - 조회에 실패했으면 null (구버전 플랜도 null)
+            "return_departure_time": (flight.slices or {}).get("return_departure_time"),
+            "return_arrival_time": (flight.slices or {}).get("return_arrival_time"),
         } if flight else None,
         "hotel": {
             "liteapi_hotel_id": hotel.liteapi_hotel_id,
@@ -294,6 +297,8 @@ def plan_detail(request, plan_id):
                         "latitude": item.latitude,
                         "longitude": item.longitude,
                         "place_detail": item.place_detail,
+                        "arrival_time": item.arrival_time.strftime("%H:%M") if item.arrival_time else None,
+                        "duration_min": item.duration_min,
                         "travel_min_to_next": item.travel_min_to_next,
                         "travel_mode": item.travel_mode,
                     }
