@@ -57,6 +57,7 @@ def trip_list(request):
         latest_plan = tr.plans.last()
         trips.append({
             "request_id": tr.id,
+            "title": tr.title,      # 사용자가 붙인 이름 (빈 값이면 프론트가 목적지로 표시)
             "departure": tr.departure,
             "destinations": [d.city_name for d in tr.destinations.all()],
             "start_date": tr.start_date,
@@ -431,6 +432,35 @@ def plan_rollback(request, plan_id):
         "copied_from": src_plan.id,
         "status": new_plan.status,
     })
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def trip_update_title(request, request_id):
+    """
+    계획 이름(제목) 수정 — 목록에서 연필 버튼으로 이름을 바꿀 때 사용
+
+    Request:  {"title": "샌프란시스코 출장"}  (빈 문자열 = 이름 제거 → 목적지 표시로 복귀)
+    Response 200: {"request_id": .., "title": ".."}
+    Response 400: 60자 초과
+    Response 404: 없거나 남의 요청
+    """
+
+    try:
+        trip_request = TripRequest.objects.get(id=request_id, user=request.user)
+    except TripRequest.DoesNotExist:
+        return Response({"error": "여행 요청을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    # strip(): 앞뒤 공백만 있는 입력은 "이름 없음"과 동일하게 취급
+    title = (request.data.get("title") or "").strip()
+    if len(title) > 60:
+        return Response({"error": "이름은 60자 이내로 입력해 주세요."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    trip_request.title = title
+    trip_request.save(update_fields=["title", "updated_at"])
+    return Response({"request_id": trip_request.id, "title": trip_request.title})
 
 
 @api_view(["DELETE"])
