@@ -147,6 +147,8 @@ def save_pipeline_result(plan_id, result):
                     latitude=item.get("lat"),
                     longitude=item.get("lng"),
                     place_detail=item.get("place_detail"),
+                    arrival_time=item.get("arrival_time"),
+                    duration_min=item.get("duration_min"),
                     travel_min_to_next=item.get("travel_min_to_next"),
                     travel_mode=item.get("travel_mode"),
                 )
@@ -170,6 +172,8 @@ def load_day_plan(plan):
                     "lat": item.latitude,
                     "lng": item.longitude,
                     "place_detail": item.place_detail,
+                    "arrival_time": item.arrival_time,
+                    "duration_min": item.duration_min,
                     "travel_min_to_next": item.travel_min_to_next,
                     "travel_mode": item.travel_mode,
                 }
