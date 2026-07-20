@@ -155,6 +155,9 @@ def _candidates_ui(plan, flight_row, hotel_row):
             "utility_reasons": raw.get("reasons"),
             "stars": raw.get("star_rating"),
             "address": raw.get("address"),
+            # 상세 펼침의 미니 지도용 좌표 (스냅샷에 이미 저장돼 있음)
+            "latitude": raw.get("latitude"),
+            "longitude": raw.get("longitude"),
             "selected": bool(hotel_row and hotel_row.liteapi_hotel_id == str(o.get("label"))
                              and hotel_row.price_krw == (o.get("krw") or 0)),
         })
