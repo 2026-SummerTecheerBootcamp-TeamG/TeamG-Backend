@@ -26,6 +26,7 @@ from rest_framework import serializers
 from drf_spectacular.utils import extend_schema
 from urllib.parse import quote
 
+from agents.budget import allocate_budget
 from agents.edit_router import route_edit_request
 from agents.tasks import run_local_edit
 
@@ -118,6 +119,46 @@ def _hotel_booking_url(hotel, trip_request):
     dest = trip_request.destinations.first()
     city = (dest.city_en or dest.city_name) if dest else ""
     return f"https://www.google.com/travel/search?q={quote(f'{hotel.name} {city}')}"
+
+
+def _candidates_ui(plan, flight_row, hotel_row):
+    """
+    저장된 후보 스냅샷(Plan.candidates)을 비교 UI가 바로 쓸 평평한 형태로 변환
+
+    selected: 현재 이 플랜이 선택 중인 후보인지 — 프론트가 "현재 선택" 배지를 붙일 근거.
+    (항공은 항공사명+가격, 숙소는 LiteAPI id+가격으로 대조 — 저장 시점 값 그대로라 안전)
+    """
+    cands = plan.candidates or {}
+    flights, hotels = [], []
+    for i, o in enumerate(cands.get("flights") or []):
+        raw = o.get("raw") or {}
+        flights.append({
+            "index": i,
+            "airline": o.get("label"),
+            "price_krw": o.get("krw"),
+            "utility": o.get("utility"),
+            "utility_reasons": o.get("utility_reasons"),
+            "departure_time": raw.get("departure_time"),
+            "arrival_time": raw.get("arrival_time"),
+            "duration_min": raw.get("duration_min"),
+            "stops": raw.get("stops"),
+            "selected": bool(flight_row and flight_row.airline == o.get("label")
+                             and flight_row.price_krw == (o.get("krw") or 0)),
+        })
+    for i, o in enumerate(cands.get("hotels") or []):
+        raw = o.get("raw") or {}
+        hotels.append({
+            "index": i,
+            "name": raw.get("name") or str(o.get("label")),
+            "price_krw": o.get("krw"),
+            "utility": o.get("utility"),
+            "utility_reasons": raw.get("reasons"),
+            "stars": raw.get("star_rating"),
+            "address": raw.get("address"),
+            "selected": bool(hotel_row and hotel_row.liteapi_hotel_id == str(o.get("label"))
+                             and hotel_row.price_krw == (o.get("krw") or 0)),
+        })
+    return {"flights": flights, "hotels": hotels}
 
 
 @api_view(["GET"])
@@ -233,6 +274,8 @@ def plan_detail(request, plan_id):
             # LiteAPI 응답 스냅샷에 주소가 있으면 노출 (없으면 null — FE가 숨김)
             "address": (hotel.detail or {}).get("address"),
         } if hotel else None,
+        # 검색 당시 후보 목록 (비교·재선택 UI용, 가격은 검색 시점 기준)
+        "candidates": _candidates_ui(plan, flight, hotel),
         "days": [
             {
                 "day_number": day.day_number,
@@ -432,6 +475,89 @@ def plan_rollback(request, plan_id):
         "copied_from": src_plan.id,
         "status": new_plan.status,
     })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def plan_select_candidate(request, plan_id):
+    """
+    저장된 후보 목록에서 항공/숙소를 직접 골라 교체 (멘토 피드백: 비교·선택 UI)
+
+    핵심: 재검색 없이 검색 당시 후보 스냅샷으로 "결정론 재배분"만 수행 —
+    외부 API·LLM 호출이 0회라 동기(즉시) 응답이 가능하다.
+    고른 쪽은 그 후보로 고정, 반대쪽은 현재 선택 유지, 활동비 등급만
+    남은 예산에 맞게 엔진(allocate_budget)이 다시 정한다.
+    결과는 기존 수정 흐름과 동일하게 "새 버전"으로 저장 (원본 보존).
+
+    Request:  {"kind": "flight" | "hotel", "index": 0}
+    Response 200: {"new_plan_id": .., "summary": "숙소를 '...'(으)로 변경했습니다."}
+    Response 400: 확정된 계획 / 잘못된 kind·index
+    """
+    from trips.services import save_budget_edited_version
+
+    plan = _get_my_plan(request, plan_id)
+    if plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+    if plan.status == Plan.Status.CONFIRMED:
+        return Response({"error": "확정된 계획은 후보를 변경할 수 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    kind = request.data.get("kind")
+    if kind not in ("flight", "hotel"):
+        return Response({"error": "kind는 flight 또는 hotel이어야 합니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        index = int(request.data.get("index"))
+    except (TypeError, ValueError):
+        return Response({"error": "index가 올바르지 않습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    pool = (plan.candidates or {}).get(
+        "flights" if kind == "flight" else "hotels") or []
+    if not 0 <= index < len(pool):
+        return Response({"error": "해당 후보를 찾을 수 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    chosen = pool[index]
+
+    # 반대쪽은 현재 선택을 "유일 옵션"으로 넣는다 — 예산영향 수정과 같은 수법.
+    # 엔진은 (고른 후보 + 기존 반대쪽) 조합을 기준으로 활동비 등급만 재조정한다.
+    selection = (plan.allocation or {}).get("selection") or {}
+    cur_flight, cur_hotel = selection.get("flight"), selection.get("hotel")
+    flight_pool = [chosen] if kind == "flight" else ([cur_flight] if cur_flight else [])
+    hotel_pool = [chosen] if kind == "hotel" else ([cur_hotel] if cur_hotel else [])
+
+    tr = plan.request
+    days = (tr.end_date - tr.start_date).days + 1
+    allocation = allocate_budget(
+        total_budget=tr.total_budget,
+        flight_options=flight_pool,
+        hotel_options=hotel_pool,
+        days=days,
+        travelers=tr.adult + tr.kid,
+    )
+    if allocation.get("status") in ("no_flights", "no_hotels"):
+        # 방어: 저장 스냅샷이라 가격이 항상 있지만, 만약을 위해
+        return Response({"error": "이 후보로는 배분할 수 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    kind_ko = "항공" if kind == "flight" else "숙소"
+    label = ((chosen.get("raw") or {}).get("name")
+             or chosen.get("label") or "?")
+    summary = f"{kind_ko}을 '{label}'(으)로 변경했습니다."
+    if allocation.get("status") == "insufficient":
+        summary += " 다만 이 조합은 예산을 초과해요 — 다른 후보를 고르거나 예산을 조정해 보세요."
+
+    new_plan = Plan.objects.create(
+        request=tr,
+        edit_request=f"[후보 선택] {kind_ko} 변경 → {label}",
+    )
+    # 선택/일정/후보 스냅샷을 새 버전으로 저장 (status는 안에서 DRAFT로 전환)
+    save_budget_edited_version(plan, new_plan, allocation, None)
+    new_plan.edit_summary = summary
+    new_plan.save(update_fields=["edit_summary"])
+
+    return Response({"new_plan_id": new_plan.id, "summary": summary})
 
 
 @api_view(["PATCH"])
