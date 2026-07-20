@@ -11,21 +11,35 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
+import os
+from dotenv import load_dotenv
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+load_dotenv(BASE_DIR / ".env")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-2fjx+r)+jhz#=sg+%8trm0$63*@z1md(odb5d2y&+mgyt)tl6u'
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    'django-insecure-2fjx+r)+jhz#=sg+%8trm0$63*@z1md(odb5d2y&+mgyt)tl6u',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
 
-ALLOWED_HOSTS = []
+# 빈 항목 방어: 환경변수가 빈 값이거나 끝에 쉼표가 붙어도 죽지 않게
+# (조각 중 내용 있는 것만 남기고, 전부 비면 개발 기본값으로 복귀)
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+] or ["localhost", "127.0.0.1"]
 
 
 # Application definition
@@ -37,9 +51,21 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # 서드파티
+    'corsheaders',      # CORS - 다른 도메인(Vercel)의 브라우저 요청 허용
+    'rest_framework',  # Django REST Framework — API 구현에 사용
+    'drf_spectacular',
+    "django_prometheus",
+    'users',    # User 모델
+    'agents',   # 에이전트
+    'trips',    # 여행 도메인 모델 (요청/플랜/일정, ERD 중 User 제외 8개)
+    'payments', # 결제 (토스페이먼츠 샌드박스)
+    'provider', # 자체 제작 액티비티 공급자 (재고/hold/reserve)
 ]
 
 MIDDLEWARE = [
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
+    'corsheaders.middleware.CorsMiddleware',    # CORS 헤더는 가장 먼저 처리돼야 함
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -47,6 +73,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -75,11 +102,14 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB'),
+        'USER': os.environ.get('POSTGRES_USER'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),   # 운영 = RDS 엔드포인트
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -117,7 +147,75 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# collectstatic이 정적 파일을 모아둘 곳 - 운영에서 nginx가 이 폴더를 서빙
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+AUTH_USER_MODEL = "users.User"
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),   # access 토큰 유효기간 30분
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),      # refresh 토큰 유효기간 7일
+}
+
+# API 문서를 drf0spectacular로 만들어야 함을 DRF에 알림
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+}
+
+# Redis 캐시 설정
+# parse/ API에서 파싱 결과를 session_id 기준으로 임시 저장
+# parse/answer/ API에서 꺼내서 원문과 병합 후 재파싱
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/1"),
+        # DB 1번 사용 (0번은 Celery 브로커용으로 비워둠)
+        "TIMEOUT": 60 * 30,  # 30분 후 자동 삭제 (재질문 흐름은 짧으니까 충분)
+    }
+}
+
+# Celery 설정
+# 브로커: 작업 주문서가 쌓이는 대기열. docker-compose의 RabbitMQ 컨테이너
+# "amqp://계정:비밀번호@주소:포트//" 형식
+# 마지막 //는 기본 가상호스트(vhost)라는 뜻
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL", "amqp://guest:guest@localhost:5672//"
+)
+
+# 결과 백엔드: 태스크 실행 결과가 저장되는 곳
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND", "redis://localhost:6379/0"
+)
+
+# 주문서/결과를 JSON으로만 주고받기
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+
+# 결과를 Redis에 1시간만 보관 후 자동 삭제
+CELERY_RESULT_EXPIRES = 60 * 60
+
+# CORS: 프론트엔드가 브라우저에서 이 API를 호출할 수 있게 허용
+# 빈 항목 방어: 빈 값/끝 쉼표에도 죽지 않게 (원리는 ALLOWED_HOSTS와 동일)
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+] or ["http://localhost:5173"]
+
+# CSRF_TRUSTED_ORIGINS: https 뒤에서 admin 등 폼 제출을 허용할 출처.
+# (API는 JWT라 CSRF와 무관하지만, /admin 화면은 세션+CSRF를 쓰므로 필요)
+# 운영 .env 예: CSRF_TRUSTED_ORIGINS=https://api.tripcanvas.cloud
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
+]

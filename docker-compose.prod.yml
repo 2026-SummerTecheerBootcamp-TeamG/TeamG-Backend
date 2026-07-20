@@ -1,0 +1,57 @@
+# 운영용 구성 — 개발용(docker-compose.yml)과 별도 파일.
+# 실행: docker compose -f docker-compose.prod.yml up -d --build
+# postgres 서비스가 없다: 운영 DB는 RDS (관리형, EC2 밖)
+
+services:
+
+  nginx:
+    image: nginx:1.27
+    container_name: teamg-nginx
+    ports:
+      - "80:80"                     # 인증서 검증 + https 리다이렉트
+      - "443:443"                   # 실제 서비스 문 (HTTPS)
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro   # ro = 읽기 전용
+      - static_volume:/app/staticfiles:ro                      # collectstatic 결과 공유
+      - certbot-conf:/etc/letsencrypt:ro                       # 인증서 (certbot이 발급)
+      - certbot-www:/var/www/certbot:ro                        # 갱신 검증 파일
+    depends_on:
+      - web
+
+  web:
+    build: .                        # 위 Dockerfile로 빌드
+    container_name: teamg-web
+    env_file: .env                  # EC2에 수동 작성한 운영 .env 주입
+    volumes:
+      - static_volume:/app/staticfiles
+    depends_on:
+      - rabbitmq
+      - redis
+    # 포트를 밖에 안 연다 — nginx만 통해서 접근 (보안)
+
+  worker:
+    build: .                        # web과 같은 이미지
+    container_name: teamg-worker
+    command: celery -A config worker -l info    # 리눅스라 --pool=solo 불필요!
+    env_file: .env
+    depends_on:
+      - rabbitmq
+      - redis
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: teamg-rabbitmq
+    # 관리 UI(15672)는 운영에서 밖에 안 연다
+
+  redis:
+    image: redis:7
+    container_name: teamg-redis
+
+volumes:
+  static_volume:    # web이 모은 정적 파일을 nginx가 읽는 공유 창고
+  # name을 고정하는 이유: compose는 볼륨 이름에 프로젝트명을 접두사로 붙이는데,
+  # 인증서 발급은 compose 밖에서 docker run으로 하므로 이름이 일치해야 한다
+  certbot-conf:
+    name: certbot-conf
+  certbot-www:
+    name: certbot-www
