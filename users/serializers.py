@@ -140,7 +140,8 @@ class ProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["user_id", "nickname", "email", "nationality", "default_departure"]
+        fields = ["user_id", "nickname", "email", "nationality", "default_departure",
+                  "profile_image"]
 
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
@@ -160,11 +161,13 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["nickname", "email", "nationality", "default_departure"]
+        fields = ["nickname", "email", "nationality", "default_departure",
+                  "profile_image"]
         extra_kwargs = {
             "nickname": {"required": False},
             "email": {"required": False},
             "default_departure": {"required": False},
+            "profile_image": {"required": False},
         }
 
     def validate_email(self, value):
@@ -185,6 +188,23 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 "국가코드는 영문 2자리여야 합니다. (예: KR)"
             )
         return value.upper()
+
+    def validate_profile_image(self, value):
+        """
+        프로필 사진은 프론트가 256×256으로 잘라 보낸 data URL 문자열.
+        - 빈 문자열 = 사진 제거 (허용)
+        - 형식: 반드시 "data:image/"로 시작 (아무 텍스트나 저장되는 것 방지)
+        - 크기: 40만 자(base64 기준 약 300KB) 제한 — 아바타 용도에 충분하고 DB 비대 방지
+        """
+        if not value:
+            return value
+        if not value.startswith("data:image/"):
+            raise serializers.ValidationError("이미지 형식의 파일만 등록할 수 있습니다.")
+        if len(value) > 400_000:
+            raise serializers.ValidationError(
+                "이미지가 너무 큽니다. 다른 사진으로 시도해 주세요."
+            )
+        return value
 
     def validate_default_departure(self, value):
         """

@@ -25,6 +25,9 @@ class TripRequest(models.Model):
         on_delete=models.CASCADE,   # 부모(User)가 삭제되면 같이 삭제
         related_name="trip_requests",
     )
+    # 사용자가 직접 붙인 계획 이름 (빈 문자열 = 미설정 → 목록에서 목적지로 표시)
+    # 피드백: 목록 이름이 방문 지역으로 자동 설정만 되고 바꿀 수 없었음
+    title = models.CharField(max_length=60, blank=True, default="")
     departure = models.CharField(max_length=100)    # 출발 도시 표시명 ("서울")
     origin_iata = models.CharField(max_length=3, null=True, blank=True) # 출발 공항 "ICN"
     start_date = models.DateField()     # 여행 시작일

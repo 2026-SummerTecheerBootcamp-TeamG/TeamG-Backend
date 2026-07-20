@@ -23,6 +23,9 @@ urlpatterns = [
     # POST /api/v1/trips/plans/{plan_id}/ticket     항공 발권 접수 (자체 mock 공급자, 에이전트 수행)
     path("plans/<int:plan_id>/ticket", views.plan_ticket_flight, name="plan-ticket"),
 
+    # PATCH /api/v1/trips/{request_id}/title        계획 이름(제목) 수정
+    path("<int:request_id>/title", views.trip_update_title, name="trip-title"),
+
     # DELETE /api/v1/trips/{request_id}/            여행 요청 삭제
     path("<int:request_id>", views.trip_delete, name="trip-delete"),
 
