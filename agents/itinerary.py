@@ -258,10 +258,10 @@ def _clock_time(minutes: int) -> _time:
 def _schedule_day(items: list[dict], start_min: int, end_min: int) -> list[dict]:
     """가용 시간대에 맞춰 항목을 채우고 각 항목의 arrival_time(도착 예정 시각)을 채움
 
-    시간대를 넘기는 항목부터는 그 날 일정에서 뺀다. 공항 항목(맨 앞=도착공항 /
-    맨 뒤=출발공항)은 시간 체크 없이 항상 포함한다 - 이동 거점이지 시간에 맞춰
-    뺄 수 있는 방문 활동이 아니기 때문. (주의: 단순 break로는 안 됨 - 출발일은
-    공항이 리스트 맨 뒤라, 앞쪽 일반 항목에서 break하면 공항까지 통째로 사라짐)
+    시간대를 넘기는 항목만 그 날 일정에서 뺀다(continue) - break를 쓰면 도착일처럼
+    시작이 늦춰진 날 첫 항목 하나만 안 맞아도 뒤의 점심/저녁까지 통째로 사라짐.
+    공항 항목(맨 앞=도착공항 / 맨 뒤=출발공항)은 시간 체크 없이 항상 포함한다 -
+    이동 거점이지 시간에 맞춰 뺄 수 있는 방문 활동이 아니기 때문.
     """
 
     if not items:
@@ -282,7 +282,6 @@ def _schedule_day(items: list[dict], start_min: int, end_min: int) -> list[dict]
         kept.append(items[0])
         clock += items[0].get("travel_min_to_next") or 0
 
-    trimmed = False
     meal_idx = 0    # 몇 번째 식사 항목을 만났는지 (0=점심, 1=저녁)
     for item in regular:
         if item.get("kind") == "food" and meal_idx < len(MEAL_ANCHORS_MIN):
@@ -293,17 +292,16 @@ def _schedule_day(items: list[dict], start_min: int, end_min: int) -> list[dict]
             meal_idx += 1
         duration = item.get("duration_min") or 0
         if clock + duration > end_min:
-            trimmed = True
-            break
+            # 이 항목만 건너뛰고 계속 - 뒤에 점심/저녁 등 시간이 맞는 항목이 있을 수 있음
+            if kept:
+                # 건너뛴 항목이 다음 방문지였으므로 직전 항목의 '다음 장소까지
+                # 이동정보'는 더 이상 실제로 이어지는 경로가 아님 -> 무효화
+                kept[-1]["travel_min_to_next"] = None
+                kept[-1]["travel_mode"] = None
+            continue
         item["arrival_time"] = _clock_time(clock)
         kept.append(item)
         clock += duration + (item.get("travel_min_to_next") or 0)
-
-    if trimmed and kept:
-        # 뒤가 잘렸으니 마지막 남은 일반 항목의 '다음 장소까지 이동정보'는 무의미해짐
-        # (공항 항목의 travel_min_to_next는 원래 없음 - 항상 마지막 항목이므로 무해)
-        kept[-1]["travel_min_to_next"] = None
-        kept[-1]["travel_mode"] = None
 
     if airport_back:
         # 남은 일정이 없거나 일찍 끝났어도 출발 공항 시각은 최소 end_min 기준으로 표시
