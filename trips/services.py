@@ -100,9 +100,12 @@ def _diet_candidates(flight_options, hotel_options, top_n=8):
             "label": o.get("label"), "krw": o.get("krw"),
             "utility": o.get("utility"),
             "utility_reasons": o.get("utility_reasons"),
+            # departure_token: 이 후보로 교체할 때 귀국편 시각을 SerpApi에서
+            # 재조회하기 위한 열쇠 (귀국 시각 자체는 검색 단계에 없어서 저장 불가 —
+            # 이 토큰이 빠지면 교체 후 귀국편 정보가 통째로 사라지는 버그가 됐었음)
             "raw": {k: raw.get(k) for k in
                     ("departure_time", "arrival_time", "duration_min",
-                     "stops", "expires_at")},
+                     "stops", "expires_at", "departure_token")},
         }
 
     def diet_hotel(o):
