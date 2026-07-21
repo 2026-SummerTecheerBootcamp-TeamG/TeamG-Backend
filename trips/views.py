@@ -161,6 +161,9 @@ def _candidates_ui(plan, flight_row, hotel_row):
             "arrival_time": raw.get("arrival_time"),
             "duration_min": raw.get("duration_min"),
             "stops": raw.get("stops"),
+            # 귀국 시각 — 조회된 후보만 값이 있음 (없으면 FE가 펼칠 때 즉석 조회)
+            "return_departure_time": raw.get("return_departure_time"),
+            "return_arrival_time": raw.get("return_arrival_time"),
             "over_budget": _over_if(o.get("krw"), cur_hotel_krw),
             # 출발 시각까지 대조 — 같은 항공사·같은 가격에 시각만 다른 후보가
             # 흔한데(같은 노선 아침/저녁 편), 시각을 빼면 둘 다 "현재 선택"으로
@@ -565,6 +568,9 @@ def plan_select_candidate(request, plan_id):
     if kind == "flight":
         token = (chosen.get("raw") or {}).get("departure_token")
         first_dest = tr.destinations.first()
+        # 이미 조회돼 스냅샷에 캐시된 후보(비교 모달에서 펼쳐봤던 편)는 재조회 생략
+        if (chosen.get("raw") or {}).get("return_departure_time"):
+            token = None
         if token and tr.origin_iata and first_dest and first_dest.iata_code:
             try:
                 from agents.flight.flight import get_return_leg_times
@@ -623,6 +629,74 @@ def plan_select_candidate(request, plan_id):
     new_plan.save(update_fields=["edit_summary"])
 
     return Response({"new_plan_id": new_plan.id, "summary": summary})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def plan_candidate_return_leg(request, plan_id, index):
+    """
+    후보 항공편의 귀국 시각 즉석 조회 (비교 모달 상세 펼침용)
+
+    귀국 시각은 원래 "선택된 편"에 대해서만 조회되는 구조라 후보 스냅샷에는 없다.
+    사용자가 후보를 펼쳐볼 때 이 API로 그 자리에서 조회하고, 결과를 스냅샷에
+    다시 저장(캐시)해 같은 후보를 또 펼치거나 교체할 때 재조회를 아낀다
+    (SerpApi 무료 쿼터 보호).
+
+    Response 200: {"available": true, "return_departure_time": .., "return_arrival_time": ..}
+                  {"available": false}  — 토큰 없음(구버전 스냅샷)/조회 실패, FE는 안내 문구 유지
+    """
+    plan = _get_my_plan(request, plan_id)
+    if plan is None:
+        return Response({"error": "플랜을 찾을 수 없습니다."},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    cands = plan.candidates or {}
+    pool = cands.get("flights") or []
+    if not 0 <= index < len(pool):
+        return Response({"error": "해당 후보를 찾을 수 없습니다."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    raw = pool[index].get("raw") or {}
+
+    # 캐시 히트: 이미 조회된 적 있는 후보
+    if raw.get("return_departure_time"):
+        return Response({
+            "available": True,
+            "return_departure_time": raw.get("return_departure_time"),
+            "return_arrival_time": raw.get("return_arrival_time"),
+        })
+
+    token = raw.get("departure_token")
+    tr = plan.request
+    first_dest = tr.destinations.first()
+    if not (token and tr.origin_iata and first_dest and first_dest.iata_code):
+        return Response({"available": False})   # 재료 부족 — 조용히 불가 처리
+
+    try:
+        from agents.flight.flight import get_return_leg_times
+        return_leg = get_return_leg_times(
+            departure_token=token,
+            departure_id=tr.origin_iata,
+            arrival_id=first_dest.iata_code,
+            outbound_date=str(tr.start_date),
+            return_date=str(tr.end_date),
+            adults=tr.adult,
+        )
+    except Exception:
+        return_leg = None
+    if not return_leg:
+        return Response({"available": False})
+
+    # 스냅샷에 병합 저장 = 캐시 (JSON 컬럼이라 마이그레이션 없이 필드 추가 가능)
+    raw.update(return_leg)
+    pool[index]["raw"] = raw
+    plan.candidates = cands
+    plan.save(update_fields=["candidates"])
+
+    return Response({
+        "available": True,
+        "return_departure_time": return_leg.get("return_departure_time"),
+        "return_arrival_time": return_leg.get("return_arrival_time"),
+    })
 
 
 @api_view(["PATCH"])
