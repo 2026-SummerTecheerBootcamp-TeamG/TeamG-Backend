@@ -338,6 +338,8 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                     latitude=item_by_name[name]["lat"],
                     longitude=item_by_name[name]["lng"],
                     place_detail=item_by_name[name]["place_detail"],
+                    arrival_time=item_by_name[name].get("arrival_time"),
+                    duration_min=item_by_name[name].get("duration_min"),
                     # 변경된 날은 동선이 달라져 기존 이동시간이 무의미
                     travel_min_to_next=item_by_name[name]["travel_min_to_next"] if unchanged else None,
                     travel_mode=item_by_name[name]["travel_mode"] if unchanged else None,
