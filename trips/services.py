@@ -21,6 +21,9 @@ from trips.models import (
 )
 from agents.itinerary import (
     DAY_START_MIN, DAY_END_MIN, estimate_duration_min, schedule_day_times,
+    # _day_window: 항공 도착/출발 시각 -> 그 날 가용 시간대. 밑줄이 붙어 있지만
+    # 최초 생성과 "같은 규칙"으로 재계산하는 것이 목적이라 일부러 같은 함수를 쓴다
+    _day_window,
 )
 
 
@@ -247,7 +250,13 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
     - 이름 순서가 원본과 같은 날 -> 행을 통째로 복사 (시각/이동시간 포함)
     - 순서/구성이 바뀐 날 -> 이동시간은 null, 도착 시각은 그 날 가용 시간대에
       맞춰 재계산(_day_edit_window + schedule_day_times) - 새로 추가된 장소도
-      이 과정에서 arrival_time을 얻음. 가용 시간을 넘는 항목은 dropped에 포함됨
+      이 과정에서 arrival_time을 얻음
+
+    반환: (new_plan, dropped_unknown, dropped_no_time)
+      dropped_unknown: 실존 목록에 없는 이름 (할루시네이션 차단으로 제외)
+      dropped_no_time: 실존하지만 그 날 가용 시간을 넘어 잘린 장소
+      — 사유가 다르면 사용자 안내도 달라야 해서 분리 ("목록에 없음"과
+        "시간이 부족함"은 재시도 방향이 완전히 다름)
 
     extra_pool: [{"name","lat","lng","rating","user_ratings","address","kind"}, ...]
     """
@@ -273,6 +282,9 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 "rating": c.get("rating"),
                 "user_ratings": c.get("user_ratings"),
                 "address": c.get("address"),
+                # kind도 스냅샷에 보존 — 이 장소가 다음 수정 때 또 재스케줄돼도
+                # 식사 앵커(12시/18시)를 잃지 않게 (최초 생성 _to_items와 같은 규칙)
+                **({"kind": kind} if kind else {}),
             },
             # 새로 추가되는 장소는 원본에 없던 항목이라 체류시간을 여기서 추정해둠
             # (구성이 바뀐 날은 아래에서 어차피 시각을 통째로 재계산하므로 이 값이 실제로 쓰임)
@@ -283,7 +295,8 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
     original_names = {d["day"]: [i["place_name"] for i in d["items"]] for d in original}
     city_by_day = {d["day"]: d.get("city") for d in original}
 
-    dropped = []
+    dropped_unknown = []    # 실존 목록에 없는 이름 (할루시네이션 차단)
+    dropped_no_time = []    # 실존하지만 그 날 가용 시간을 넘어 잘림
 
     with transaction.atomic():
         # 새 plan 버전
@@ -329,7 +342,7 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 if name in item_by_name:
                     valid_names.append(name)
                 else:
-                    dropped.append(name)
+                    dropped_unknown.append(name)
 
             # 이름 순서가 원본과 완전히 같으면 = 변경 없는 날 -> 이동시간/시각 보존
             unchanged = valid_names == original_names.get(day_number, [])
@@ -356,9 +369,12 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                         "lat": item_by_name[name]["lat"],
                         "lng": item_by_name[name]["lng"],
                         "place_detail": item_by_name[name]["place_detail"],
-                        # kind: 새로 추가된 후보는 값이 있어 점심/저녁 시간대에 고정됨
-                        # (기존 항목은 DB에 kind를 저장하지 않아 None -> 앵커링 미적용)
-                        "kind": item_by_name[name].get("kind"),
+                        # kind: 점심/저녁 앵커(12시/18시) 식별용.
+                        # 새 후보는 최상위에, 기존 항목은 place_detail 스냅샷에 있다
+                        # (시간 기능 이후 생성분부터 — 그 전 구버전 플랜은 None이라
+                        #  앵커 없이 순차 배치되는 기존 동작 유지)
+                        "kind": (item_by_name[name].get("kind")
+                                 or (item_by_name[name].get("place_detail") or {}).get("kind")),
                         "duration_min": item_by_name[name].get("duration_min"),
                         "travel_min_to_next": None,
                         "travel_mode": None,
@@ -367,9 +383,10 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 ]
                 start_min, end_min = _day_edit_window(original, day_number)
                 scheduled = schedule_day_times(day_inputs, start_min, end_min)
-                # 가용 시간을 넘어 스케줄러가 잘라낸 장소는 "추가 실패"로 알림
+                # 가용 시간을 넘어 스케줄러가 잘라낸 장소 — "시간 부족" 사유로 분리 보고
                 kept_names = {it["place_name"] for it in scheduled}
-                dropped.extend(name for name in valid_names if name not in kept_names)
+                dropped_no_time.extend(
+                    name for name in valid_names if name not in kept_names)
 
             # bulk_create: 장소별 INSERT를 하루치 1번으로 묶음 (저장 내용은 동일)
             ItineraryItem.objects.bulk_create([
@@ -387,7 +404,7 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 for order, it in enumerate(scheduled, start=1)
             ])
 
-    return new_plan, dropped
+    return new_plan, dropped_unknown, dropped_no_time
 
 
 def _day_edit_window(original: list[dict], day_number: int) -> tuple[int, int]:
@@ -398,6 +415,11 @@ def _day_edit_window(original: list[dict], day_number: int) -> tuple[int, int]:
     기준으로 씀 (최초 생성 때 이미 항공편 시각+버퍼가 반영된 값이라 재계산이
     불필요함 - agents.itinerary._day_window/_schedule_day 참고). 없으면 기본
     하루 시간대(09:00~21:00)를 씀.
+
+    알려진 비대칭(허용): 출국 공항의 arrival_time은 max(일정 종료, 창 종료)라
+    일정이 꽉 찼던 날엔 실제 창보다 살짝 늦을 수 있음 → 편집 창이 그만큼
+    넓어져 원래라면 잘렸을 항목이 살아남을 수 있다. 사용자에게 유리한 방향의
+    오차라 그대로 둔다 (좁히면 멀쩡한 항목이 갑자기 잘리는 쪽이 더 나쁨).
     """
 
     day = next((d for d in original if d["day"] == day_number), None)
@@ -436,6 +458,9 @@ def copy_plan_version(src_plan, edit_request_note):
             request=src_plan.request,
             status=Plan.Status.DRAFT,       # 복사본은 다시 확정 전 상태로
             allocation=src_plan.allocation,
+            # 후보 스냅샷 계승 — 이게 빠지면 롤백한 버전에서 비교 버튼이 사라진다
+            # (후보 비교 기능이 롤백 경로를 빠뜨렸던 누락, 시간 기능 리뷰에서 발견)
+            candidates=src_plan.candidates,
             narrative=src_plan.narrative,
             edit_request=edit_request_note  # "v{n}으로 롤백" 기록
         )
@@ -461,13 +486,14 @@ def copy_plan_version(src_plan, edit_request_note):
             )
 
         # 일정은 행 단위 그대로 복사
-        for day in src_plan.days.all():
+        # (prefetch로 읽기 N+1 제거 + bulk_create로 쓰기 INSERT 묶음 — 내용 동일)
+        for day in src_plan.days.prefetch_related("items"):
             day_row = ItineraryDay.objects.create(
                 plan=new_plan, day_number=day.day_number,
                 city_name=day.city_name, date=day.date,
             )
-            for item in day.items.all():
-                ItineraryItem.objects.create(
+            ItineraryItem.objects.bulk_create([
+                ItineraryItem(
                     day=day_row, visit_order=item.visit_order,
                     place_name=item.place_name,
                     latitude=item.latitude, longitude=item.longitude,
@@ -477,6 +503,8 @@ def copy_plan_version(src_plan, edit_request_note):
                     travel_min_to_next=item.travel_min_to_next,
                     travel_mode=item.travel_mode,
                 )
+                for item in day.items.all()
+            ])
 
         return new_plan
     
@@ -561,8 +589,34 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
     재검색하지 않은 쪽은 태스크가 "기존 선택을 유일 옵션"으로 투입했으므로
     selection에 기존 값이 그대로 담겨 온다 — 저장 로직은 한 갈래로 통일.
     왜 일정은 복사인가: 숙소/항공이 바뀌어도 방문지 동선은 그대로 (일정 변경은 국소수정 관할).
+    단, 항공편이 실제로 바뀌어 도착/귀국출발 '시각'이 달라졌으면 첫날/마지막날의
+    도착 예정 시각만 새 항공 시각 기준으로 재계산한다 — 21시 도착 편으로 바꿨는데
+    첫날이 10:30부터 시작하는 낡은 표시를 막기 위함 (시간 기능 리뷰 반영).
+
+    반환: (new_plan, trimmed) — trimmed는 재계산 결과 새 항공 시간대에 들어가지
+    못해 일정에서 빠진 장소 이름 목록 (호출자가 사용자 안내에 사용)
     """
     selection = allocation.get("selection") or {}
+
+    # ── 항공 시각 변경 감지 (숙소만 바뀐 수정이면 시각이 같아 재계산 자체가 없음) ──
+    new_raw = (selection.get("flight") or {}).get("raw") or {}
+    old_slices = getattr(getattr(old_plan, "flight", None), "slices", None) or {}
+    tr = old_plan.request
+
+    new_arrival = new_raw.get("arrival_time")               # 가는 편 도착 "YYYY-MM-DD HH:MM"
+    resched_first = bool(new_arrival) and new_arrival != old_slices.get("arrival_time")
+    # 익일 도착 가드 (build_day_plan과 같은 원칙): 도착 날짜가 첫날이 아니면 반영 생략
+    if resched_first and not new_arrival.startswith(str(tr.start_date)):
+        resched_first = False
+
+    new_return_dep = new_raw.get("return_departure_time")   # 귀국 편 출발 (없을 수 있음 —
+    # 후보 비교 교체 경로의 스냅샷에는 귀국 시각이 없다. 그 경우 마지막 날은 기존
+    # 시각대로 두는 것이 최선 (없는 정보로 기본 창을 강제하면 오히려 더 틀림)
+    resched_last = bool(new_return_dep) and new_return_dep != old_slices.get("return_departure_time")
+    if resched_last and not new_return_dep.startswith(str(tr.end_date)):
+        resched_last = False
+
+    trimmed = []    # 재계산으로 새 시간대에 못 들어가 빠진 장소들
 
     with transaction.atomic():
         new_plan.allocation = allocation
@@ -607,25 +661,71 @@ def save_budget_edited_version(old_plan, new_plan, allocation, explanation):
                 detail=raw,
             )
 
-        # 일정: 원본 행 통째 복사 (이동시간 포함 — 내용 동일하므로 전부 유효)
-        # prefetch로 읽기 N+1 제거 + bulk_create로 쓰기 INSERT 묶음 (내용 동일)
-        for day in old_plan.days.prefetch_related("items"):
+        # 일정: 기본은 원본 행 통째 복사 (이동시간·시각 포함 — 내용 동일하므로 전부 유효).
+        # 항공 시각이 바뀐 첫날/마지막날만 도착 예정 시각을 재계산한다.
+        # prefetch로 읽기 N+1 제거 + bulk_create로 쓰기 INSERT 묶음
+        days = list(old_plan.days.prefetch_related("items"))
+        first_no = days[0].day_number if days else None
+        last_no = days[-1].day_number if days else None
+
+        for day in days:
             day_row = ItineraryDay.objects.create(
                 plan=new_plan, day_number=day.day_number,
                 city_name=day.city_name, date=day.date,
             )
-            ItineraryItem.objects.bulk_create([
-                ItineraryItem(
-                    day=day_row, visit_order=item.visit_order,
-                    place_name=item.place_name,
-                    latitude=item.latitude, longitude=item.longitude,
-                    place_detail=item.place_detail,
-                    arrival_time=item.arrival_time,
-                    duration_min=item.duration_min, est_cost=item.est_cost,
-                    travel_min_to_next=item.travel_min_to_next,
-                    travel_mode=item.travel_mode,
-                )
-                for item in day.items.all()
-            ])
 
-    return new_plan
+            is_first = day.day_number == first_no and resched_first
+            is_last = day.day_number == last_no and resched_last
+            if is_first or is_last:
+                # 새 항공 시각으로 그 날 가용 시간대를 다시 만들고(최초 생성과 같은
+                # _day_window 규칙), 같은 장소·같은 순서로 시각만 다시 흘린다
+                start_min, end_min = _day_window(
+                    new_arrival if is_first else None,
+                    new_return_dep if is_last else None,
+                )
+                day_inputs = [
+                    {
+                        "place_name": item.place_name,
+                        "lat": item.latitude, "lng": item.longitude,
+                        "place_detail": item.place_detail,
+                        # kind는 place_detail 스냅샷에서 복원 (식사 앵커 유지)
+                        "kind": (item.place_detail or {}).get("kind"),
+                        "duration_min": item.duration_min,
+                        "travel_min_to_next": item.travel_min_to_next,
+                        "travel_mode": item.travel_mode,
+                    }
+                    for item in day.items.all()
+                ]
+                scheduled = schedule_day_times(day_inputs, start_min, end_min)
+                kept = {it["place_name"] for it in scheduled}
+                trimmed.extend(
+                    it["place_name"] for it in day_inputs if it["place_name"] not in kept)
+                ItineraryItem.objects.bulk_create([
+                    ItineraryItem(
+                        day=day_row, visit_order=order,
+                        place_name=it["place_name"],
+                        latitude=it["lat"], longitude=it["lng"],
+                        place_detail=it["place_detail"],
+                        arrival_time=it.get("arrival_time"),
+                        duration_min=it.get("duration_min"),
+                        travel_min_to_next=it.get("travel_min_to_next"),
+                        travel_mode=it.get("travel_mode"),
+                    )
+                    for order, it in enumerate(scheduled, start=1)
+                ])
+            else:
+                ItineraryItem.objects.bulk_create([
+                    ItineraryItem(
+                        day=day_row, visit_order=item.visit_order,
+                        place_name=item.place_name,
+                        latitude=item.latitude, longitude=item.longitude,
+                        place_detail=item.place_detail,
+                        arrival_time=item.arrival_time,
+                        duration_min=item.duration_min, est_cost=item.est_cost,
+                        travel_min_to_next=item.travel_min_to_next,
+                        travel_mode=item.travel_mode,
+                    )
+                    for item in day.items.all()
+                ])
+
+    return new_plan, trimmed
