@@ -30,7 +30,47 @@ DAY_END_MIN = 21 * 60      # 21:00
 ARRIVAL_BUFFER_MIN = 60    # 입국심사+수하물+공항→시내 이동 여유
 DEPARTURE_BUFFER_MIN = 120  # 출국 수속 여유 (공항 도착 목표 시각까지)
 # 장소 종류별 체류 시간 기본값(분) - 실측 데이터가 없어 쓰는 보수적 추정치
-VISIT_MIN = {"food": 70, "attraction": 90, "airport": 0}
+# (예전 90/70분 기준으로는 관광 2곳+점심을 다 마쳐도 오후 3시밖에 안 돼서
+#  저녁 앵커(18시대)까지 3시간 넘게 비는 날이 흔했음 - 실사용 피드백 반영)
+VISIT_MIN = {"food": 80, "attraction": 110, "airport": 0}
+# 점심/저녁 각각 "최소 이 시각 이후" 배치 - 관광이 일찍 끝나도 식사 시각까지는
+# 자연스러운 대기 시간으로 채워짐 (앞 일정이 끝나자마자 바로 저녁을 먹는 부자연스러움 방지)
+# 저녁을 18:30 -> 18:00으로 살짝 당겨서 위 체류시간 증가분과 함께 공백을 더 좁힘
+MEAL_ANCHORS_MIN = [12 * 60, 18 * 60]   # 점심 12:00, 저녁 18:00
+DINNER_MIN_DURATION = 90   # 저녁은 점심보다 여유 있게 - 기본 food 체류시간(70분)보다 길게
+
+# Google Places의 구체 타입별 체류 시간(분) - VISIT_MIN의 food/attraction 2분류보다
+# 세분화된 값이 있으면 우선 적용 (박물관/공원/카페가 전부 "관광 90분"으로 뭉개지던 문제)
+# dict 순서 = 우선순위 (한 장소가 여러 타입을 가질 때 앞쪽 타입이 우선)
+DURATION_BY_TYPE = {
+    "amusement_park": 180, "water_park": 180, "movie_theater": 150, "zoo": 150,
+    "museum": 120, "aquarium": 120, "national_park": 120, "night_club": 120,
+    "amusement_center": 120, "shopping_mall": 90, "department_store": 90,
+    "art_gallery": 90, "spa": 90, "bar": 90, "park": 60, "market": 60,
+    "cafe": 45, "church": 45, "hindu_temple": 45, "mosque": 45, "synagogue": 45,
+    "bakery": 30,
+}
+# 음식점 계열 타입 - 편집 시 추가되는 후보의 food/attraction 분류(kind)에 씀
+FOOD_TYPES = {"restaurant", "cafe", "bakery", "bar", "food"}
+
+
+def estimate_duration_min(place: dict, kind: str | None = None) -> int:
+    """장소의 Google Places 타입을 보고 체류 시간을 추정. 세분류가 없으면 kind의
+    food/attraction 기본값(VISIT_MIN)으로 폴백"""
+
+    types = set(place.get("types") or [])
+    for t, minutes in DURATION_BY_TYPE.items():
+        if t in types:
+            return minutes
+    return VISIT_MIN.get(kind, 90)
+
+
+def infer_kind(place: dict) -> str:
+    """Google Places 타입으로 food/attraction 분류 - 편집 시 새로 추가되는
+    후보(collect_edit_candidates)는 최초 생성 파이프라인처럼 미리 분류되어
+    있지 않아 타입으로 역추정해야 함"""
+
+    return "food" if set(place.get("types") or []) & FOOD_TYPES else "attraction"
 
 
 def _collect_places(queries: list[str], seen: set, center, per_query: int = 20) -> list[dict]:
@@ -145,7 +185,8 @@ def _to_items(stops: list[dict], departure_time_iso: str | None) -> list[dict]:
             "lat": s["lat"],
             "lng": s["lng"],
             "place_detail": place_detail,
-            "duration_min": VISIT_MIN.get(s.get("kind"), 90),   # 체류 시간 기본값
+            "kind": s.get("kind"),   # _schedule_day가 식사 항목(점심/저녁)을 식별하는 데 씀
+            "duration_min": estimate_duration_min(s, s.get("kind")),   # 체류 시간 추정
             "travel_min_to_next": travel["duration_min"] if travel else None,
             "travel_mode": travel["mode"] if travel else None,
         })
@@ -237,7 +278,14 @@ def _schedule_day(items: list[dict], start_min: int, end_min: int) -> list[dict]
         clock += items[0].get("travel_min_to_next") or 0
 
     trimmed = False
+    meal_idx = 0    # 몇 번째 식사 항목을 만났는지 (0=점심, 1=저녁)
     for item in regular:
+        if item.get("kind") == "food" and meal_idx < len(MEAL_ANCHORS_MIN):
+            # 관광이 일찍 끝났어도 식사 시각까지는 자연스럽게 대기 - 뒤가 안 당겨짐
+            clock = max(clock, MEAL_ANCHORS_MIN[meal_idx])
+            if meal_idx == 1:   # 저녁은 좀 더 여유 있게 먹는다고 가정
+                item["duration_min"] = max(item.get("duration_min") or 0, DINNER_MIN_DURATION)
+            meal_idx += 1
         duration = item.get("duration_min") or 0
         if clock + duration > end_min:
             trimmed = True
@@ -261,6 +309,16 @@ def _schedule_day(items: list[dict], start_min: int, end_min: int) -> list[dict]
     for order, item in enumerate(kept, start=1):
         item["visit_order"] = order
     return kept
+
+
+def schedule_day_times(items: list[dict], start_min: int = DAY_START_MIN,
+                       end_min: int = DAY_END_MIN) -> list[dict]:
+    """국소수정으로 재조립된 하루 일정에 도착 예정 시각을 (재)계산해 채움
+
+    최초 생성과 동일한 규칙(_schedule_day)을 그대로 재사용 - 가용 시간대를
+    넘는 항목은 반환값에서 빠짐 (호출자가 원래 목록과 대조해 dropped 처리)
+    """
+    return _schedule_day(items, start_min, end_min)
 
 
 def _build_city_days(destination: dict, themes: list[str], plan_days: int,
@@ -311,18 +369,31 @@ def _build_city_days(destination: dict, themes: list[str], plan_days: int,
     for p in attractions:
         p["kind"] = "attraction"
 
-    # 선별: 하루 = 관광 2곳 + 맛집 1곳 기준 -> 동선 정렬 -> 날짜 분할
+    # 선별: 하루 = 관광 2곳 + 맛집 2곳(점심/저녁) 기준, 총 4개 -> 동선 정렬 -> 날짜 분할
+    # (예전엔 관광 2 + 맛집 1뿐이라 항목들을 시간 순으로 그냥 이어붙이기만 해서
+    #  총 체류시간이 4시간 안팍 -> 하루 가용시간(09~21시)의 절반도 못 채우고
+    #  오후 1~4시쯔 일정이 끝나버리는 문제가 있었음. 지금은 개수 자체보다
+    #  점심/저녁을 실제 식사 시간대에 고정 배치하는 쪽(_schedule_day의
+    #  MEAL_ANCHORS_MIN)이 핵심 - 관광이 일찍 끝나도 저녁 전까지는 자연스러운
+    #  대기 시간으로 채워져서 하루가 저녁까지 이어짐)
     top_attractions = _pick_top(attractions, plan_days * 2)
-    top_foods = _pick_top(foods, plan_days)
+    top_foods = _pick_top(foods, plan_days * 2)
     attr_chunks = _split_into_days(_order_by_nearest(top_attractions), plan_days)
 
-    # 날짜별 구성 1단계: 그 날의 관광지들 + 맛집 1곳 -> 동선 재정렬 (API 호출 없음, 즉시 끝남)
+    # 날짜별 구성 1단계: 관광지 사이에 점심을 끼워 넣고 저녁은 맨 뒤에 붙임
+    # (예전엔 관광+식사를 한 목록에 다 넣고 동선(NN)으로만 정렬해서 점심/저녁이
+    #  아무 위치에나 낄 수 있었음 - 저녁이 오후 2시 자리에 꽂히는 식. 식사는 동선보다
+    #  "언제 먹는지"가 더 중요해서 위치를 명시적으로 고정하고, _schedule_day가
+    #  실제 시각을 맞춰줌)
     day_stops = []
     for i in range(plan_days):
-        stops = list(attr_chunks[i]) if i < len(attr_chunks) else []
-        if i < len(top_foods):
-            stops.append(top_foods[i])
-        day_stops.append(_order_by_nearest(stops))  # 맛집이 끼어들었으니 그 날 동선을 재정렬
+        attrs = list(attr_chunks[i]) if i < len(attr_chunks) else []
+        day_foods = top_foods[i * 2:(i + 1) * 2]
+        lunch, dinner = day_foods[:1], day_foods[1:2]
+
+        mid = (len(attrs) + 1) // 2   # 관광지를 반으로 나눠 점심 앞뒤로 배치
+        stops = attrs[:mid] + lunch + attrs[mid:] + dinner
+        day_stops.append(stops)
 
     # 공항 부착: 동선 정렬 이후에 붙여야 함 (NN 정렬에 섞이면 공항이 하루 중간에 낄 수 있음)
     if (include_arrival_airport or include_departure_airport) and day_stops:
@@ -411,7 +482,12 @@ def collect_edit_candidates(city_en: str, country_code: str | None,
     generic = _drop_lodging(_collect_places(queries, seen, center, per_query=per_query)) + rest
 
     # 프롬프트 비대 방지: 보호 슬롯 + 인기도 상위로 총 12곳까지만
-    return protected + _pick_top(generic, 12 - len(protected))
+    result = protected + _pick_top(generic, 12 - len(protected))
+    # 최초 생성 파이프라인은 food/attraction을 검색어 단계에서 미리 나눠 태깅하지만
+    # 여긴 한 목록에서 섞어 고르므로 타입으로 역추정 - 나중에 체류시간 추정에 씀
+    for p in result:
+        p["kind"] = infer_kind(p)
+    return result
 
 
 def build_day_plan(destinations: list[dict], themes: list[str] | None = None,

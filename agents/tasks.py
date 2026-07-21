@@ -278,7 +278,8 @@ def run_local_edit(run_id, plan_id, edit_request):
     new_plan.save()
     trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
                   f"plan {plan_id} -> {new_plan.id}"
-                  + (f" · 제외된 미확인 장소 {len(dropped)}건" if dropped else ""))
+                  # 미확인(할루시네이션) 장소 or 그 날 가용 시간을 넘어 잘린 장소, 둘 다 포함
+                  + (f" · 제외된 장소 {len(dropped)}건" if dropped else ""))
     trace.done(run_id, "국소 수정 완료")
 
     return {
