@@ -162,8 +162,13 @@ def _candidates_ui(plan, flight_row, hotel_row):
             "duration_min": raw.get("duration_min"),
             "stops": raw.get("stops"),
             "over_budget": _over_if(o.get("krw"), cur_hotel_krw),
+            # 출발 시각까지 대조 — 같은 항공사·같은 가격에 시각만 다른 후보가
+            # 흔한데(같은 노선 아침/저녁 편), 시각을 빼면 둘 다 "현재 선택"으로
+            # 표시되는 버그가 됐었음 (실사고)
             "selected": bool(flight_row and flight_row.airline == o.get("label")
-                             and flight_row.price_krw == (o.get("krw") or 0)),
+                             and flight_row.price_krw == (o.get("krw") or 0)
+                             and (flight_row.slices or {}).get("departure_time")
+                                 == raw.get("departure_time")),
         })
     for i, o in enumerate(cands.get("hotels") or []):
         raw = o.get("raw") or {}
