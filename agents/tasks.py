@@ -678,6 +678,34 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         language_for_nationality(getattr(tr.user, "nationality", None)),
     )
 
+    # ── 3.5 재검색으로 항공이 바뀌었으면 귀국편 시각을 조회해 채운다 ──────
+    # 풀 파이프라인과 같은 이유: 검색 결과에는 가는 편 정보뿐이라, 이걸 빼먹으면
+    # 새 버전의 계획서에서 귀국편 정보가 사라지고 마지막 날 시각 재계산도 불가.
+    # (숙소만 바뀐 수정은 기존 선택에 귀국 시각이 이미 있어 이 블록을 건너뜀)
+    sel_flight = (allocation.get("selection") or {}).get("flight")
+    sel_raw = (sel_flight or {}).get("raw") or {}
+    if (sel_flight and sel_raw.get("departure_token")
+            and not sel_raw.get("return_departure_time")):
+        tr = old_plan.request
+        dest0 = tr.destinations.first()
+        if tr.origin_iata and dest0 and dest0.iata_code:
+            try:
+                from agents.flight.flight import get_return_leg_times
+                return_leg = get_return_leg_times(
+                    departure_token=sel_raw["departure_token"],
+                    departure_id=tr.origin_iata,
+                    arrival_id=dest0.iata_code,
+                    outbound_date=str(tr.start_date),
+                    return_date=str(tr.end_date),
+                    adults=tr.adult,
+                )
+                if return_leg:
+                    sel_raw.update(return_leg)
+                    sel_flight["raw"] = sel_raw
+                    trace.publish(run_id, "api", "google", "귀국편 시각 조회 완료")
+            except Exception as e:
+                logger.warning("귀국편 시각 조회 실패(계속 진행): %s", e)
+
     # ── 4. 새 버전 저장 (재검색된 쪽 새것, 나머지 원본 유지) ────────────
     # trimmed: 항공 시각이 바뀌어 첫날/마지막날을 재계산한 결과, 새 시간대에
     # 들어가지 못해 일정에서 빠진 장소들 (아래 요약에 안내를 덧붙임)

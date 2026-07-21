@@ -26,7 +26,7 @@ from rest_framework import serializers
 from drf_spectacular.utils import extend_schema
 from urllib.parse import quote
 
-from agents.budget import allocate_budget
+from agents.budget import allocate_budget, _activity_cost
 from agents.edit_router import route_edit_request
 from agents.tasks import run_local_edit
 
@@ -69,6 +69,9 @@ def trip_list(request):
             "total_budget": tr.total_budget,
             "plan_id": latest_plan.id if latest_plan else None,
             "status": latest_plan.status if latest_plan else None,
+            # 계획안 총 비용 — 목록에서 "총 비용 / 예산" 표시용 (배분 전이면 None)
+            "total_cost": ((latest_plan.allocation or {}).get("total_cost")
+                           if latest_plan else None),
             "created_at": tr.created_at,
         })
 
@@ -133,6 +136,19 @@ def _candidates_ui(plan, flight_row, hotel_row):
     """
     cands = plan.candidates or {}
     flights, hotels = [], []
+
+    # 예산 초과 예고(over_budget): "이 후보로 바꾸면(반대쪽은 현재 선택 유지,
+    # 활동비는 최소 등급) 예산을 넘는가" — 배분 엔진의 부족 판정과 같은 산식이라
+    # 실제 교체 결과와 어긋나지 않는다. FE가 경고 문구를 붙이는 근거.
+    tr = plan.request
+    days_cnt = (tr.end_date - tr.start_date).days + 1
+    min_activity = _activity_cost(0, days_cnt, tr.adult + tr.kid)
+    cur_flight_krw = flight_row.price_krw if flight_row else 0
+    cur_hotel_krw = hotel_row.price_krw if hotel_row else 0
+
+    def _over_if(flight_krw, hotel_krw):
+        return (flight_krw or 0) + (hotel_krw or 0) + min_activity > tr.total_budget
+
     for i, o in enumerate(cands.get("flights") or []):
         raw = o.get("raw") or {}
         flights.append({
@@ -145,6 +161,7 @@ def _candidates_ui(plan, flight_row, hotel_row):
             "arrival_time": raw.get("arrival_time"),
             "duration_min": raw.get("duration_min"),
             "stops": raw.get("stops"),
+            "over_budget": _over_if(o.get("krw"), cur_hotel_krw),
             "selected": bool(flight_row and flight_row.airline == o.get("label")
                              and flight_row.price_krw == (o.get("krw") or 0)),
         })
@@ -161,6 +178,7 @@ def _candidates_ui(plan, flight_row, hotel_row):
             # 상세 펼침의 미니 지도용 좌표 (스냅샷에 이미 저장돼 있음)
             "latitude": raw.get("latitude"),
             "longitude": raw.get("longitude"),
+            "over_budget": _over_if(cur_flight_krw, o.get("krw")),
             "selected": bool(hotel_row and hotel_row.liteapi_hotel_id == str(o.get("label"))
                              and hotel_row.price_krw == (o.get("krw") or 0)),
         })
@@ -533,6 +551,32 @@ def plan_select_candidate(request, plan_id):
                         status=status.HTTP_400_BAD_REQUEST)
     chosen = pool[index]
 
+    # ── 항공 교체면 귀국편 시각을 지금 조회해 채운다 ─────────────────────
+    # 후보 스냅샷은 검색 단계의 것이라 귀국편 시각이 없다 (귀국 시각은 선택된
+    # 편에 대해서만 departure_token으로 별도 조회하는 구조). 이걸 빼먹으면
+    # 교체 후 계획서에서 귀국편 정보가 사라지고, 마지막 날 일정 시각도
+    # 재계산할 수 없다 (실사고). 실패해도 교체 자체는 계속 — 귀국 정보만 빠짐.
+    tr = plan.request
+    if kind == "flight":
+        token = (chosen.get("raw") or {}).get("departure_token")
+        first_dest = tr.destinations.first()
+        if token and tr.origin_iata and first_dest and first_dest.iata_code:
+            try:
+                from agents.flight.flight import get_return_leg_times
+                return_leg = get_return_leg_times(
+                    departure_token=token,
+                    departure_id=tr.origin_iata,
+                    arrival_id=first_dest.iata_code,
+                    outbound_date=str(tr.start_date),
+                    return_date=str(tr.end_date),
+                    adults=tr.adult,
+                )
+                if return_leg:
+                    # 원본(스냅샷)을 오염시키지 않도록 사본에 병합
+                    chosen = dict(chosen, raw=dict(chosen.get("raw") or {}, **return_leg))
+            except Exception:
+                pass    # 부가 정보라 실패는 조용히 넘어감 (기본 창으로 진행)
+
     # 반대쪽은 현재 선택을 "유일 옵션"으로 넣는다 — 예산영향 수정과 같은 수법.
     # 엔진은 (고른 후보 + 기존 반대쪽) 조합을 기준으로 활동비 등급만 재조정한다.
     selection = (plan.allocation or {}).get("selection") or {}
@@ -540,7 +584,6 @@ def plan_select_candidate(request, plan_id):
     flight_pool = [chosen] if kind == "flight" else ([cur_flight] if cur_flight else [])
     hotel_pool = [chosen] if kind == "hotel" else ([cur_hotel] if cur_hotel else [])
 
-    tr = plan.request
     days = (tr.end_date - tr.start_date).days + 1
     allocation = allocate_budget(
         total_budget=tr.total_budget,
