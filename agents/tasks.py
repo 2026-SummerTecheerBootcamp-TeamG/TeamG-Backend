@@ -243,20 +243,33 @@ def run_local_edit(run_id, plan_id, edit_request):
     # "다른 음식점 추가해줘" 같은 요청에 대비해 신선한 후보를 미리 검색.
     # (편집기는 실존 목록의 이름만 고를 수 있어서, 후보 없이는 추가가 불가능했음
     #  — 오사카 실사용 피드백 반영. 검색 실패해도 편집 자체는 계속)
+    #
+    # ⚡ 단, 요청에 "추가/교체" 의도 신호가 전혀 없으면 검색을 통째로 생략 —
+    # "3일차에 XXX 빼줘" 같은 빼기/이동/여유 요청은 새 장소가 필요 없는데도
+    # Places 검색(도시당 4쿼리+지오코딩, 수 초)을 돌려 수정 체감 시간을 늘렸다.
+    # 신호 목록은 보수적으로: 애매하면 검색하는 쪽(기능 보존)이 기본값.
+    ADD_SIGNALS = ("추가", "넣", "새로", "다른", "대신", "바꾸", "바꿔", "교체",
+                   "더 ", "채워", "알차", "추천")
+    wants_add = any(s in edit_request for s in ADD_SIGNALS)
+
     exclude = {item["place_name"] for d in day_plan for item in d["items"]}
     extra_pool = []
-    for dest in old_plan.request.destinations.all():
-        try:
-            extra_pool += collect_edit_candidates(
-                dest.city_en or dest.city_name, dest.country_code,
-                edit_request, exclude,
-            )
-        except Exception as e:
-            trace.publish(run_id, "api", "google", "추가 후보 검색 실패(계속 진행)",
-                          str(e)[:120])
-    if extra_pool:
-        trace.publish(run_id, "api", "google", "추가 후보 검색",
-                      f"{len(extra_pool)}곳 (새 장소 추가 요청 대비)")
+    if wants_add:
+        for dest in old_plan.request.destinations.all():
+            try:
+                extra_pool += collect_edit_candidates(
+                    dest.city_en or dest.city_name, dest.country_code,
+                    edit_request, exclude,
+                )
+            except Exception as e:
+                trace.publish(run_id, "api", "google", "추가 후보 검색 실패(계속 진행)",
+                              str(e)[:120])
+        if extra_pool:
+            trace.publish(run_id, "api", "google", "추가 후보 검색",
+                          f"{len(extra_pool)}곳 (새 장소 추가 요청 대비)")
+    else:
+        trace.publish(run_id, "data", "orchestrator", "후보 검색 생략",
+                      "추가 의도가 없는 요청 (빼기/이동/여유) — 수 초 단축")
 
     edited = edit_day_plan(run_id, day_plan, edit_request,
                            extra_candidates=extra_pool)
