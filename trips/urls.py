@@ -20,6 +20,11 @@ urlpatterns = [
     # POST /api/v1/trips/plans/{plan_id}/select     후보 목록에서 항공/숙소 직접 선택(교체)
     path("plans/<int:plan_id>/select", views.plan_select_candidate, name="plan-select"),
 
+    # GET /api/v1/trips/plans/{plan_id}/candidates/flight/{index}/return
+    #     후보 항공편의 귀국 시각 즉석 조회 (비교 모달 상세 펼침, 결과는 스냅샷에 캐시)
+    path("plans/<int:plan_id>/candidates/flight/<int:index>/return",
+         views.plan_candidate_return_leg, name="plan-candidate-return"),
+
     # POST /api/v1/trips/plans/{plan_id}/book/      숙소 예약 접수 (샌드박스, 에이전트 수행)
     path("plans/<int:plan_id>/book/", views.plan_book, name="plan-book"),
 
