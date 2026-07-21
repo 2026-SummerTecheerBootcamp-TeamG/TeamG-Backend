@@ -19,6 +19,9 @@ from trips.models import (
     TripRequest, TripDestination, Plan,
     Flight, Hotel, ItineraryDay, ItineraryItem, Booking,
 )
+from agents.itinerary import (
+    DAY_START_MIN, DAY_END_MIN, estimate_duration_min, schedule_day_times,
+)
 
 
 def create_request_and_plan(user, fields, raw_parsed=None):
@@ -241,10 +244,12 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
     핵심 원칙: LLM은 이름만 골랐고, 데이터는 전부 "실존 목록"에서 가져옴
     - 원본 일정 or 추가 후보 풀(extra_pool, 구글 실검색 결과)에 있는 이름만 통과
     - 둘 다에 없는 이름 -> 제외 (할루시네이션 차단은 그대로)
-    - 이름 순서가 원본과 같은 날 -> 행을 통째로 복사
-    - 순서/구성이 바뀐 날 -> 이동시간은 null
+    - 이름 순서가 원본과 같은 날 -> 행을 통째로 복사 (시각/이동시간 포함)
+    - 순서/구성이 바뀐 날 -> 이동시간은 null, 도착 시각은 그 날 가용 시간대에
+      맞춰 재계산(_day_edit_window + schedule_day_times) - 새로 추가된 장소도
+      이 과정에서 arrival_time을 얻음. 가용 시간을 넘는 항목은 dropped에 포함됨
 
-    extra_pool: [{"name","lat","lng","rating","user_ratings","address"}, ...]
+    extra_pool: [{"name","lat","lng","rating","user_ratings","address","kind"}, ...]
     """
 
     original = load_day_plan(old_plan)
@@ -260,6 +265,7 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
         name = c.get("name")
         if not name or name in item_by_name:
             continue
+        kind = c.get("kind")
         item_by_name[name] = {
             "place_name": name,
             "lat": c.get("lat"), "lng": c.get("lng"),
@@ -268,6 +274,9 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 "user_ratings": c.get("user_ratings"),
                 "address": c.get("address"),
             },
+            # 새로 추가되는 장소는 원본에 없던 항목이라 체류시간을 여기서 추정해둠
+            # (구성이 바뀐 날은 아래에서 어차피 시각을 통째로 재계산하므로 이 값이 실제로 쓰임)
+            "duration_min": estimate_duration_min(c, kind),
             # 새 장소가 낀 날은 동선이 달라지므로 이동시간은 어차피 null 처리됨
             "travel_min_to_next": None, "travel_mode": None,
         }
@@ -322,7 +331,7 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 else:
                     dropped.append(name)
 
-            # 이름 순서가 원본과 완전히 같으면 = 변경 없는 날 -> 이동시간 보존
+            # 이름 순서가 원본과 완전히 같으면 = 변경 없는 날 -> 이동시간/시각 보존
             unchanged = valid_names == original_names.get(day_number, [])
 
             day_row = ItineraryDay.objects.create(
@@ -330,24 +339,86 @@ def create_edited_version(old_plan, edited, edit_request, extra_pool=None):
                 city_name=city_by_day.get(day_number),
                 date=start_date + timedelta(days=day_number - 1),
             )
+
+            if unchanged:
+                # 구성이 그대로면 원본 시각/이동정보를 그대로 씀 (재계산 불필요)
+                scheduled = [
+                    dict(item_by_name[name], place_name=name)
+                    for name in valid_names
+                ]
+            else:
+                # 구성/순서가 바뀐 날(추가/삭제/재배열) -> 그 날 가용 시간대에 맞춰
+                # 도착 시각을 통째로 다시 계산. 새로 추가된 장소도 여기서 처음으로
+                # arrival_time을 얻음 (기존엔 이 경로에서 시간 필드가 통째로 비어버렸음)
+                day_inputs = [
+                    {
+                        "place_name": name,
+                        "lat": item_by_name[name]["lat"],
+                        "lng": item_by_name[name]["lng"],
+                        "place_detail": item_by_name[name]["place_detail"],
+                        # kind: 새로 추가된 후보는 값이 있어 점심/저녁 시간대에 고정됨
+                        # (기존 항목은 DB에 kind를 저장하지 않아 None -> 앵커링 미적용)
+                        "kind": item_by_name[name].get("kind"),
+                        "duration_min": item_by_name[name].get("duration_min"),
+                        "travel_min_to_next": None,
+                        "travel_mode": None,
+                    }
+                    for name in valid_names
+                ]
+                start_min, end_min = _day_edit_window(original, day_number)
+                scheduled = schedule_day_times(day_inputs, start_min, end_min)
+                # 가용 시간을 넘어 스케줄러가 잘라낸 장소는 "추가 실패"로 알림
+                kept_names = {it["place_name"] for it in scheduled}
+                dropped.extend(name for name in valid_names if name not in kept_names)
+
             # bulk_create: 장소별 INSERT를 하루치 1번으로 묶음 (저장 내용은 동일)
             ItineraryItem.objects.bulk_create([
                 ItineraryItem(
                     day=day_row, visit_order=order,
-                    place_name=item_by_name[name]["place_name"],
-                    latitude=item_by_name[name]["lat"],
-                    longitude=item_by_name[name]["lng"],
-                    place_detail=item_by_name[name]["place_detail"],
-                    arrival_time=item_by_name[name].get("arrival_time"),
-                    duration_min=item_by_name[name].get("duration_min"),
-                    # 변경된 날은 동선이 달라져 기존 이동시간이 무의미
-                    travel_min_to_next=item_by_name[name]["travel_min_to_next"] if unchanged else None,
-                    travel_mode=item_by_name[name]["travel_mode"] if unchanged else None,
+                    place_name=it["place_name"],
+                    latitude=it["lat"],
+                    longitude=it["lng"],
+                    place_detail=it["place_detail"],
+                    arrival_time=it.get("arrival_time"),
+                    duration_min=it.get("duration_min"),
+                    travel_min_to_next=it.get("travel_min_to_next"),
+                    travel_mode=it.get("travel_mode"),
                 )
-                for order, name in enumerate(valid_names, start=1)
+                for order, it in enumerate(scheduled, start=1)
             ])
 
     return new_plan, dropped
+
+
+def _day_edit_window(original: list[dict], day_number: int) -> tuple[int, int]:
+    """
+    국소수정으로 재스케줄할 때 쓸 그 날의 가용 시간대(분, 자정 기준) 추정
+
+    원본 일정에 입국/출국 공항 항목이 있으면 그 도착 시각을 그대로 시작/종료
+    기준으로 씀 (최초 생성 때 이미 항공편 시각+버퍼가 반영된 값이라 재계산이
+    불필요함 - agents.itinerary._day_window/_schedule_day 참고). 없으면 기본
+    하루 시간대(09:00~21:00)를 씀.
+    """
+
+    day = next((d for d in original if d["day"] == day_number), None)
+    if not day or not day["items"]:
+        return DAY_START_MIN, DAY_END_MIN
+
+    def is_airport(item: dict) -> bool:
+        return (item.get("place_detail") or {}).get("category") == "airport"
+
+    items = day["items"]
+    start_min = DAY_START_MIN
+    if is_airport(items[0]) and items[0].get("arrival_time"):
+        t = items[0]["arrival_time"]
+        start_min = t.hour * 60 + t.minute
+
+    end_min = DAY_END_MIN
+    if is_airport(items[-1]) and items[-1].get("arrival_time"):
+        t = items[-1]["arrival_time"]
+        end_min = t.hour * 60 + t.minute
+
+    return start_min, end_min
 
 
 def copy_plan_version(src_plan, edit_request_note):
