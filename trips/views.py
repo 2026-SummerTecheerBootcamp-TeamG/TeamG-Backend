@@ -565,8 +565,12 @@ def plan_select_candidate(request, plan_id):
         request=tr,
         edit_request=f"[후보 선택] {kind_ko} 변경 → {label}",
     )
-    # 선택/일정/후보 스냅샷을 새 버전으로 저장 (status는 안에서 DRAFT로 전환)
-    save_budget_edited_version(plan, new_plan, allocation, None)
+    # 선택/일정/후보 스냅샷을 새 버전으로 저장 (status는 안에서 DRAFT로 전환).
+    # 항공편이 바뀌어 도착 시각이 달라졌으면 첫날 일정 시각도 안에서 재계산된다 —
+    # trimmed = 그 과정에서 새 시간대에 못 들어가 빠진 장소들 (사용자에게 안내)
+    _, trimmed = save_budget_edited_version(plan, new_plan, allocation, None)
+    if trimmed:
+        summary += f" 새 항공편 시간에 맞춰 {', '.join(trimmed)}은(는) 일정에서 뺐어요."
     new_plan.edit_summary = summary
     new_plan.save(update_fields=["edit_summary"])
 

@@ -8,7 +8,7 @@ itinerary.py - 일정 에이전트
 
 import logging
 import math
-from datetime import time as _time
+from datetime import date as _date, time as _time, timedelta as _timedelta
 # 날짜별 이동시간(Routes API) 호출을 병렬로 돌리기 위한 스레드 풀
 from concurrent.futures import ThreadPoolExecutor
 
@@ -179,6 +179,11 @@ def _to_items(stops: list[dict], departure_time_iso: str | None) -> list[dict]:
         }
         if "airport" in (s.get("types") or []):
             place_detail["category"] = "airport"   # 프론트에서 공항 항목 구분용
+        if s.get("kind"):
+            # kind(food/attraction)를 DB 스냅샷(place_detail JSON)에도 보존 —
+            # 국소수정으로 그 날을 재스케줄할 때 기존 맛집이 점심/저녁 앵커(12시/18시)를
+            # 잃지 않게 하기 위함 (kind는 최상위 필드로는 DB에 저장되지 않음)
+            place_detail["kind"] = s["kind"]
         items.append({
             "visit_order": i + 1,
             "place_name": s["name"],
@@ -510,6 +515,23 @@ def build_day_plan(destinations: list[dict], themes: list[str] | None = None,
     if not destinations or not destinations[0].get("city"):
         raise ValueError("목적지가 없습니다. 파서 출력을 확인하세요.")
     themes = themes or []
+
+    # 익일 도착/타일 출발 가드: 항공 시각의 '날짜'가 여행 첫날/마지막날과 다르면
+    # (밤 비행기가 다음날 새벽 도착하는 장거리 등) 창 계산에 쓰지 않는다.
+    # 시각만 보고 창을 만들면 자정 넘김이 00:50 시작 같은 엉뚱한 표시가 되기 때문 —
+    # 이 경우 기본 시간대(09~21시)로 두는 것이 가장 덜 틀린다.
+    if flight_arrival_time and start_date and not flight_arrival_time.startswith(start_date):
+        logger.info("가는 편 도착일(%s)이 여행 첫날(%s)과 달라 창 반영 생략",
+                    flight_arrival_time[:10], start_date)
+        flight_arrival_time = None
+    if flight_departure_time and start_date:
+        total_days = sum(max(1, d.get("nights") or 1) for d in destinations) + 1
+        end_date_str = (_date.fromisoformat(start_date)
+                        + _timedelta(days=total_days - 1)).isoformat()
+        if not flight_departure_time.startswith(end_date_str):
+            logger.info("귀국 편 출발일(%s)이 마지막날(%s)과 달라 창 반영 생략",
+                        flight_departure_time[:10], end_date_str)
+            flight_departure_time = None
 
     plan_desc = " + ".join(f"{d.get('city')} {d.get('nights', '?')}박" for d in destinations)
     logger.info("일정 생성 시작: %s . 테마 %s", plan_desc, themes)
