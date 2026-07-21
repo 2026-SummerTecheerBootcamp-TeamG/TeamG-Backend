@@ -19,6 +19,15 @@ load_dotenv()   # 리포 루트 .env의 GOOGLE_MAPS_API_KEY를 환경변수로
 
 logger = logging.getLogger(__name__)
 
+# 모듈 공용 세션 — 매 호출마다 새 TCP+TLS 연결을 맺는 대신 연결을 재사용한다.
+# 일정 생성 한 번에 Routes/Places 호출이 20회를 넘는데(장기 여행은 30회+),
+# 호출당 TLS 핸드셰이크(~100ms대)가 전부 절약된다. 요청 내용/응답은 완전히 동일.
+# 날짜 단위 병렬 호출(스레드 최대 6)이 있어 풀 크기를 여유 있게 잡는다
+# (풀이 작으면 "connection pool is full" 경고와 함께 연결을 버렸다 다시 만듦)
+_session = requests.Session()
+_session.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=10, pool_maxsize=10))
+
 
 def _require_key() -> str:
     """키가 없을 경우 401보다 원인 추적이 쉬움"""
@@ -42,7 +51,7 @@ def geocode(address: str, country_code: str | None = None) -> dict | None:
         #  = '코펜하겐 NY' 사고 방지 장치가 실제로는 꺼져 있던 상태)
         params["components"] = f"country:{country_code.upper()}"
 
-    response = requests.get(
+    response = _session.get(
         "https://maps.googleapis.com/maps/api/geocode/json",
         params=params, timeout=15,
     )
@@ -86,7 +95,7 @@ def search_places(
                 "radius": float(min(radius_m, 50000)),
             }
         }
-    response = requests.post(
+    response = _session.post(
         "https://places.googleapis.com/v1/places:searchText",
         headers=headers, data=json.dumps(body), timeout=20,
     )
@@ -129,7 +138,7 @@ def _routes_once(origin, destination, mode: str, departure_time_iso: str | None)
     if travel_mode == "TRANSIT" and departure_time_iso:
         body["departureTime"] = departure_time_iso
 
-    response = requests.post(
+    response = _session.post(
         "https://routes.googleapis.com/directions/v2:computeRoutes",
         headers=headers, data=json.dumps(body), timeout=15,
     )

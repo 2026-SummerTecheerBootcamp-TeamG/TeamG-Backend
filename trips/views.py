@@ -54,8 +54,11 @@ def trip_list(request):
 
     trips = []
     for tr in requests_qs:
-        # plans는 모델 Meta에서 created_at 순 정렬 -> .last() = 최신 버전
-        latest_plan = tr.plans.last()
+        # plans는 모델 Meta에서 created_at 순 정렬 -> 마지막 원소 = 최신 버전.
+        # (.last()를 쓰면 prefetch 캐시를 무시하고 행마다 쿼리를 새로 날린다 —
+        #  N+1이었음. list()로 캐시를 그대로 써서 목록 전체가 쿼리 3번에 끝남)
+        plans = list(tr.plans.all())
+        latest_plan = plans[-1] if plans else None
         trips.append({
             "request_id": tr.id,
             "title": tr.title,      # 사용자가 붙인 이름 (빈 값이면 프론트가 목적지로 표시)
@@ -262,6 +265,9 @@ def plan_detail(request, plan_id):
             "arrival_time": (flight.slices or {}).get("arrival_time"),
             "duration_min": (flight.slices or {}).get("duration_min"),
             "stops": (flight.slices or {}).get("stops"),
+            # 오는 편(귀국편) 실제 시각 - 조회에 실패했으면 null (구버전 플랜도 null)
+            "return_departure_time": (flight.slices or {}).get("return_departure_time"),
+            "return_arrival_time": (flight.slices or {}).get("return_arrival_time"),
         } if flight else None,
         "hotel": {
             "liteapi_hotel_id": hotel.liteapi_hotel_id,
@@ -291,13 +297,17 @@ def plan_detail(request, plan_id):
                         "latitude": item.latitude,
                         "longitude": item.longitude,
                         "place_detail": item.place_detail,
+                        "arrival_time": item.arrival_time.strftime("%H:%M") if item.arrival_time else None,
+                        "duration_min": item.duration_min,
                         "travel_min_to_next": item.travel_min_to_next,
                         "travel_mode": item.travel_mode,
                     }
-                    for item in day.items.all()
+                    for item in day.items.all()     # prefetch 캐시 사용 (추가 쿼리 0)
                 ],
             }
-            for day in plan.days.all()  # Meta ordering으로 일차순 보장
+            # prefetch_related("items"): 날짜마다 items 쿼리가 나가던 N+1 제거
+            # (11일 여행이면 12쿼리 -> 2쿼리). Meta ordering으로 일차순은 그대로 보장
+            for day in plan.days.prefetch_related("items")
         ],
         # 예약 이력 (샌드박스) — 성공/실패 재시도까지 시간순으로
         "bookings": [
