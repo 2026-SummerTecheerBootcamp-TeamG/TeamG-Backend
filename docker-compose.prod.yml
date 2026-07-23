@@ -37,7 +37,10 @@ services:
     build: .                        # web과 같은 이미지
     container_name: teamg-worker
     restart: unless-stopped         # 재부팅 후 자동 기동
-    command: celery -A config worker -l info    # 리눅스라 --pool=solo 불필요!
+    # -E: 작업 이벤트(task-started/succeeded/failed 등)를 브로커로 발행
+    #     → celery-exporter가 이 이벤트를 받아 Prometheus 지표로 변환한다
+    #     (리눅스라 --pool=solo 불필요!)
+    command: celery -A config worker -l info -E
     env_file: .env
     depends_on:
       - rabbitmq
