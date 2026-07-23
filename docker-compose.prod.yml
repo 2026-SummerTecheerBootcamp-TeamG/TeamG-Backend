@@ -7,6 +7,9 @@ services:
   nginx:
     image: nginx:1.27
     container_name: teamg-nginx
+    # EC2 재부팅/도커 데몬 재시작 후 자동으로 다시 뜨게 한다
+    # (unless-stopped = 수동으로 stop한 경우만 빼고 항상 재시작)
+    restart: unless-stopped
     ports:
       - "80:80"                     # 인증서 검증 + https 리다이렉트
       - "443:443"                   # 실제 서비스 문 (HTTPS)
@@ -21,6 +24,7 @@ services:
   web:
     build: .                        # 위 Dockerfile로 빌드
     container_name: teamg-web
+    restart: unless-stopped         # 재부팅 후 자동 기동
     env_file: .env                  # EC2에 수동 작성한 운영 .env 주입
     volumes:
       - static_volume:/app/staticfiles
@@ -32,6 +36,7 @@ services:
   worker:
     build: .                        # web과 같은 이미지
     container_name: teamg-worker
+    restart: unless-stopped         # 재부팅 후 자동 기동
     command: celery -A config worker -l info    # 리눅스라 --pool=solo 불필요!
     env_file: .env
     depends_on:
@@ -41,11 +46,13 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     container_name: teamg-rabbitmq
+    restart: unless-stopped         # 재부팅 후 자동 기동
     # 관리 UI(15672)는 운영에서 밖에 안 연다
 
   redis:
     image: redis:7
     container_name: teamg-redis
+    restart: unless-stopped         # 재부팅 후 자동 기동
 
 volumes:
   static_volume:    # web이 모은 정적 파일을 nginx가 읽는 공유 창고

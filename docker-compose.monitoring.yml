@@ -17,6 +17,8 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: teamg-prometheus
+    # EC2 재부팅 후 자동 기동 (unless-stopped = 수동 stop만 제외)
+    restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -29,6 +31,7 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     container_name: teamg-grafana
+    restart: unless-stopped         # 재부팅 후 자동 기동
     ports:
       - "3000:3000"                         # 대시보드 접속 문 (보안그룹에서 3000 허용 필요)
     environment:
@@ -47,6 +50,7 @@ services:
   loki:
     image: grafana/loki:3.1.0
     container_name: teamg-loki
+    restart: unless-stopped         # 재부팅 후 자동 기동
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - ./monitoring/loki.yml:/etc/loki/loki.yml:ro
@@ -58,6 +62,7 @@ services:
   promtail:
     image: grafana/promtail:3.1.0
     container_name: teamg-promtail
+    restart: unless-stopped         # 재부팅 후 자동 기동
     command: -config.file=/etc/promtail/promtail.yml
     volumes:
       - ./monitoring/promtail.yml:/etc/promtail/promtail.yml:ro
@@ -72,11 +77,18 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: teamg-cadvisor
+    restart: unless-stopped         # 재부팅 후 자동 기동
+    # privileged가 없으면 최신 우분투(cgroup v2)에서 도커 컨테이너를 못 읽어서
+    # 시스템 서비스(system.slice)만 보이고 컨테이너 지표(name 라벨)가 안 나온다
+    privileged: true
+    devices:
+      - /dev/kmsg                          # 공식 권장 — 커널 메시지 장치
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro            # 공식 권장 — 디스크 지표용
     networks: [backend]
 
 networks:
