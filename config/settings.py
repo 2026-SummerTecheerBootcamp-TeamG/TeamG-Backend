@@ -102,7 +102,10 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        # django-prometheus의 DB 래퍼 엔진 — 순정 postgresql 엔진을 그대로 상속하면서
+        # 쿼리 실행 횟수/소요시간 지표(django_db_execute_total 등)를 추가로 수집한다.
+        # (순정 'django.db.backends.postgresql'로 두면 DB 지표가 아예 생성되지 않음)
+        'ENGINE': 'django_prometheus.db.backends.postgresql',
         'NAME': os.environ.get('POSTGRES_DB'),
         'USER': os.environ.get('POSTGRES_USER'),
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD'),
