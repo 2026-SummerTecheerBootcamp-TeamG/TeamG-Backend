@@ -99,6 +99,20 @@ services:
       - /dev/disk/:/dev/disk:ro            # 공식 권장 — 디스크 지표용
     networks: [backend]
 
+  # Celery 작업 지표 수집기 — worker가 -E 옵션으로 발행하는 작업 이벤트를
+  # RabbitMQ에서 받아 Prometheus 형식(celery-exporter:9808/metrics)으로 변환한다
+  # (worker의 -E 옵션은 docker-compose.prod.yml에서 설정)
+  celery-exporter:
+    image: danihodovic/celery-exporter:latest
+    container_name: teamg-celery-exporter
+    restart: unless-stopped
+    command:
+      # 브로커 주소 — .env의 CELERY_BROKER_URL을 그대로 쓰고,
+      # 없으면 RabbitMQ 기본 계정으로 접속 (내부 네트워크 전용이라 안전)
+      - --broker-url=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+    networks: [backend]
+    # 포트를 밖에 안 연다 — Prometheus만 내부 네트워크로 접근
+
 networks:
   backend:
     external: true                    # "이미 있는 네트워크에 합류" 선언
