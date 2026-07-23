@@ -41,6 +41,18 @@ ALLOWED_HOSTS = [
     if h.strip()
 ] or ["localhost", "127.0.0.1"]
 
+# ── 운영 전용 보안 설정 (DEBUG=false, 즉 운영 환경에서만 켜짐) ──
+if not DEBUG:
+    # nginx가 https를 풀어서(종료) http로 전달하므로, Django는 이 헤더를 보고
+    # "원래 https 접속이었다"를 판정한다 (nginx가 X-Forwarded-Proto를 붙여줌)
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # 세션/CSRF 쿠키를 https 연결에서만 전송 — 중간자가 쿠키를 가로채지 못하게
+    # (API는 JWT라 무관하지만 /admin 화면이 세션+CSRF 쿠키를 쓴다)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # 쿠키를 자바스크립트에서 읽지 못하게 (XSS로 세션 탈취 방지, 세션은 기본 True)
+    CSRF_COOKIE_HTTPONLY = True
+
 
 # Application definition
 
