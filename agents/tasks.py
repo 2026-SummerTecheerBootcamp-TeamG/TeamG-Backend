@@ -243,26 +243,42 @@ def run_local_edit(run_id, plan_id, edit_request):
     # "다른 음식점 추가해줘" 같은 요청에 대비해 신선한 후보를 미리 검색.
     # (편집기는 실존 목록의 이름만 고를 수 있어서, 후보 없이는 추가가 불가능했음
     #  — 오사카 실사용 피드백 반영. 검색 실패해도 편집 자체는 계속)
+    #
+    # ⚡ 단, 요청에 "추가/교체" 의도 신호가 전혀 없으면 검색을 통째로 생략 —
+    # "3일차에 XXX 빼줘" 같은 빼기/이동/여유 요청은 새 장소가 필요 없는데도
+    # Places 검색(도시당 4쿼리+지오코딩, 수 초)을 돌려 수정 체감 시간을 늘렸다.
+    # 신호 목록은 보수적으로: 애매하면 검색하는 쪽(기능 보존)이 기본값.
+    ADD_SIGNALS = ("추가", "넣", "새로", "다른", "대신", "바꾸", "바꿔", "교체",
+                   "더 ", "채워", "알차", "추천")
+    wants_add = any(s in edit_request for s in ADD_SIGNALS)
+
     exclude = {item["place_name"] for d in day_plan for item in d["items"]}
     extra_pool = []
-    for dest in old_plan.request.destinations.all():
-        try:
-            extra_pool += collect_edit_candidates(
-                dest.city_en or dest.city_name, dest.country_code,
-                edit_request, exclude,
-            )
-        except Exception as e:
-            trace.publish(run_id, "api", "google", "추가 후보 검색 실패(계속 진행)",
-                          str(e)[:120])
-    if extra_pool:
-        trace.publish(run_id, "api", "google", "추가 후보 검색",
-                      f"{len(extra_pool)}곳 (새 장소 추가 요청 대비)")
+    if wants_add:
+        for dest in old_plan.request.destinations.all():
+            try:
+                extra_pool += collect_edit_candidates(
+                    dest.city_en or dest.city_name, dest.country_code,
+                    edit_request, exclude,
+                )
+            except Exception as e:
+                trace.publish(run_id, "api", "google", "추가 후보 검색 실패(계속 진행)",
+                              str(e)[:120])
+        if extra_pool:
+            trace.publish(run_id, "api", "google", "추가 후보 검색",
+                          f"{len(extra_pool)}곳 (새 장소 추가 요청 대비)")
+    else:
+        trace.publish(run_id, "data", "orchestrator", "후보 검색 생략",
+                      "추가 의도가 없는 요청 (빼기/이동/여유) — 수 초 단축")
 
     edited = edit_day_plan(run_id, day_plan, edit_request,
                            extra_candidates=extra_pool)
 
-    new_plan, dropped = create_edited_version(old_plan, edited, edit_request,
-                                              extra_pool=extra_pool)
+    # dropped를 사유별로 받는다 — "목록에 없는 이름"과 "시간이 부족해 잘림"은
+    # 사용자가 취할 다음 행동이 완전히 다르다 (전자: 다른 장소 요청 / 후자: 다른 날 요청)
+    new_plan, dropped_unknown, dropped_no_time = create_edited_version(
+        old_plan, edited, edit_request, extra_pool=extra_pool)
+    dropped = dropped_unknown + dropped_no_time     # 응답 계약(dropped_names)은 그대로 유지
 
     from trips.services import load_day_plan
     from agents.itinerary_narrate import narrate_day_plan
@@ -273,20 +289,26 @@ def run_local_edit(run_id, plan_id, edit_request):
     new_plan.narrative = narrate_day_plan(
         cities, new_plan.request.themes or [], new_day_plan
     )
-    # AI의 편집 답변을 버전에 저장 — 대화 복원 때 원문 그대로 되살리기 위해
-    new_plan.edit_summary = edited.get("summary", "")
+    # AI의 편집 답변 + 시간 부족으로 못 넣은 장소 안내 — 사용자에게 "왜"를 알려줘야
+    # 재시도 방향을 잡을 수 있다 ("다른 날에 넣어줘" 등). 말투 원칙: 시스템 용어 금지
+    summary = edited.get("summary", "")
+    if dropped_no_time:
+        summary += (f" 다만 {', '.join(dropped_no_time)}은(는) 그 날 시간이 부족해 "
+                    f"넣지 못했어요. 다른 날로 옮기거나 일정을 줄여보세요.")
+    # 대화 복원 때 원문 그대로 되살리기 위해 버전에 저장
+    new_plan.edit_summary = summary
     new_plan.save()
     trace.publish(run_id, "db", "postgres", "새 버전 저장 (draft)",
                   f"plan {plan_id} -> {new_plan.id}"
-                  # 미확인(할루시네이션) 장소 or 그 날 가용 시간을 넘어 잘린 장소, 둘 다 포함
-                  + (f" · 제외된 장소 {len(dropped)}건" if dropped else ""))
+                  + (f" · 목록 밖 제외 {len(dropped_unknown)}건" if dropped_unknown else "")
+                  + (f" · 시간 부족 제외 {len(dropped_no_time)}건" if dropped_no_time else ""))
     trace.done(run_id, "국소 수정 완료")
 
     return {
         "run_id": run_id,
         "old_plan_id": plan_id,
         "new_plan_id": new_plan.id,
-        "summary": edited.get("summary", ""),
+        "summary": summary,
         "dropped_names": dropped,
     }
 
@@ -669,8 +691,38 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         language_for_nationality(getattr(tr.user, "nationality", None)),
     )
 
+    # ── 3.5 재검색으로 항공이 바뀌었으면 귀국편 시각을 조회해 채운다 ──────
+    # 풀 파이프라인과 같은 이유: 검색 결과에는 가는 편 정보뿐이라, 이걸 빼먹으면
+    # 새 버전의 계획서에서 귀국편 정보가 사라지고 마지막 날 시각 재계산도 불가.
+    # (숙소만 바뀐 수정은 기존 선택에 귀국 시각이 이미 있어 이 블록을 건너뜀)
+    sel_flight = (allocation.get("selection") or {}).get("flight")
+    sel_raw = (sel_flight or {}).get("raw") or {}
+    if (sel_flight and sel_raw.get("departure_token")
+            and not sel_raw.get("return_departure_time")):
+        tr = old_plan.request
+        dest0 = tr.destinations.first()
+        if tr.origin_iata and dest0 and dest0.iata_code:
+            try:
+                from agents.flight.flight import get_return_leg_times
+                return_leg = get_return_leg_times(
+                    departure_token=sel_raw["departure_token"],
+                    departure_id=tr.origin_iata,
+                    arrival_id=dest0.iata_code,
+                    outbound_date=str(tr.start_date),
+                    return_date=str(tr.end_date),
+                    adults=tr.adult,
+                )
+                if return_leg:
+                    sel_raw.update(return_leg)
+                    sel_flight["raw"] = sel_raw
+                    trace.publish(run_id, "api", "google", "귀국편 시각 조회 완료")
+            except Exception as e:
+                logger.warning("귀국편 시각 조회 실패(계속 진행): %s", e)
+
     # ── 4. 새 버전 저장 (재검색된 쪽 새것, 나머지 원본 유지) ────────────
-    save_budget_edited_version(old_plan, new_plan, allocation, explanation)
+    # trimmed: 항공 시각이 바뀌어 첫날/마지막날을 재계산한 결과, 새 시간대에
+    # 들어가지 못해 일정에서 빠진 장소들 (아래 요약에 안내를 덧붙임)
+    _, trimmed = save_budget_edited_version(old_plan, new_plan, allocation, explanation)
 
     # 무엇을 바꿨는지 한 줄 요약 — 챗 응답과 대화 복원(edit_summary) 양쪽에 사용
     # 말투 원칙(피드백): 사용자 언어로 짧게. "가점/재배분/후보" 같은 시스템 용어 금지
@@ -686,6 +738,10 @@ def run_budget_edit(run_id, old_plan_id, new_plan_id, edit_request):
         summary_text = f"{anchor_name}에서 가까운 곳으로 {changed_txt} 다시 잡았습니다."
     else:
         summary_text = f"요청에 맞춰 {changed_txt} 다시 잡았습니다."
+    if trimmed:
+        # 새 항공편 시각에 맞춰 첫날/마지막날을 재계산하며 빠진 장소 안내
+        summary_text += (f" 새 항공편 시간에 맞춰 {', '.join(trimmed)}은(는) "
+                         f"일정에서 뺐어요.")
     new_plan.edit_summary = summary_text
     new_plan.save(update_fields=["edit_summary"])
 
