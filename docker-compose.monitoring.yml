@@ -83,6 +83,14 @@ services:
     privileged: true
     devices:
       - /dev/kmsg                          # 공식 권장 — 커널 메시지 장치
+    command:
+      # 최신 도커(containerd 이미지 저장소, 드라이버명 overlayfs)에서는 cAdvisor가
+      # 컨테이너 디스크 사용량(rw layer) 경로를 못 찾아 "Failed to create existing
+      # container" 에러와 함께 컨테이너 지표 전체가 실패한다.
+      # → 디스크 사용량(disk) 지표만 끄면 CPU/메모리/네트워크는 정상 수집된다.
+      #   (나머지는 cAdvisor 기본 비활성 목록을 유지한 것)
+      - --disable_metrics=disk,tcp,udp,percpu,sched,process,hugetlb,referenced_memory,cpu_topology,resctrl
+      - --docker_only=true                 # 시스템 cgroup 제외, 도커 컨테이너만 수집 (소음 감소)
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
