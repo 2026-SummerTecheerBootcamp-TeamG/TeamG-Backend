@@ -20,6 +20,12 @@ scrape_configs:
     static_configs:
       - targets: ["cadvisor:8080"]
 
+  # Celery 작업 지표 (celery-exporter가 worker 이벤트를 변환해 제공)
+  # 작업 성공/실패 수, 작업별 소요 시간, worker 생존 여부 등
+  - job_name: "celery"
+    static_configs:
+      - targets: ["celery-exporter:9808"]
+
   # Prometheus 자기 자신 (수집이 살아있는지 확인용)
   - job_name: "prometheus"
     static_configs:
